@@ -1,31 +1,31 @@
-*data/
+* data/
 A directory used to save preprocessed vigenere.c files and trained models.
 
-*fake_libc_include/
+* fake_libc_include/
 Used by files that need to use pycparser to preprocess and parse C files. Taken straight from the pycparser repo, but
 with cs50.h added.
 
-*linear/
+* linear/
 Token-based approach.
 
-*search/
+* search/
 Enumerative search (may become a subdirectory of linear/, and a new enumerative search directory will go under tree/)
 
-*tasks/
+* tasks/
 A directory for web/server.js (the nodejs server for the web interface where students can submit code) and
 {linear,tree}/server.js (the Python servers that takes in student code and writes back the heatmap files) to write files
 for communication. This allows for communication between them, regardless of whether one is running under the Command
 Prompt and the other is running in the Bash subshell.
 
-*tree/
+* tree/
 Tree-based approach.
 
-*vigenere/
+* vigenere/
 A subset of the check50 submissions for vigenere.c. The pset spec changed slightly between 2015 and 2016, so within
 correct15/ are solutions that pass the 2015 checks, and within correct16/ are solutions that pass the 2016 checks.
 invalid/ contains files that are invalid for some reason (for example, pycparser couldn't parse them), no_compile/
 contains files that did not compile, and incorrect/ contains the remaining submissions that at least compile but pass
 neither the 2015 nor the 2016 checks.
 
-*web/
+* web/
 The frontend for student code submission and heatmap display.
