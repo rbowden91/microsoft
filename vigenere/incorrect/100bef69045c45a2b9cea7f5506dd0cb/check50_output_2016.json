@@ -1,0 +1,447 @@
+{
+  "results": {
+    "exists": {
+      "dependencies": [],
+      "description": "vigenere.c exists",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "exists",
+            "value": "vigenere.c"
+          }
+        }
+      ]
+    },
+    "compiles": {
+      "dependencies": [
+        "exists"
+      ],
+      "description": "vigenere.c compiles",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        }
+      ]
+    },
+    "./vigenere a": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"a\" as \"a\" using \"a\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere a"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "/opt/sandbox50/bin/run.sh: line 31: 28824 Segmentation fault      stdbuf --error=0 --output=0 \"$@\"\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": [
+              {}
+            ]
+          }
+        }
+      ]
+    },
+    "./vigenere baz barfoo": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"barfoo\" as \"caqgon\" using \"baz\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere baz"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "/opt/sandbox50/bin/run.sh: line 31: 28802 Segmentation fault      stdbuf --error=0 --output=0 \"$@\"\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": [
+              {}
+            ]
+          }
+        }
+      ]
+    },
+    "./vigenere BaZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BaRFoo\" as \"CaQGon\" using \"BaZ\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere BaZ"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "/opt/sandbox50/bin/run.sh: line 31: 28782 Segmentation fault      stdbuf --error=0 --output=0 \"$@\"\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": [
+              {}
+            ]
+          }
+        }
+      ]
+    },
+    "./vigenere BAZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BARFOO\" as \"CAQGON\" using \"BAZ\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere BAZ"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "/opt/sandbox50/bin/run.sh: line 31: 28795 Segmentation fault      stdbuf --error=0 --output=0 \"$@\"\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": [
+              {}
+            ]
+          }
+        }
+      ]
+    },
+    "./vigenere baz world": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"world!$?\" as \"xoqmd!$?\" using \"baz\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere baz"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "/opt/sandbox50/bin/run.sh: line 31: 28715 Segmentation fault      stdbuf --error=0 --output=0 \"$@\"\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": [
+              {}
+            ]
+          }
+        }
+      ]
+    },
+    "./vigenere baz": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"world, say hello!\" as \"xoqmd, rby gflkp!\" using \"baz\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere baz"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "/opt/sandbox50/bin/run.sh: line 31: 28701 Segmentation fault      stdbuf --error=0 --output=0 \"$@\"\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": [
+              {}
+            ]
+          }
+        }
+      ]
+    },
+    "./vignere": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles lack of argv[1]",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdout",
+            "value": "Please give me one command line argument next time fool...\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^([\\s\\S]*)$/"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 1
+          },
+          "expected": {
+            "type": "exit",
+            "value": 1
+          }
+        }
+      ]
+    },
+    "./vigenere 1 2 3": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles argc > 2",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere 1 2 3"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdout",
+            "value": "Please give me one command line argument next time fool...\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^([\\s\\S]*)$/"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 1
+          },
+          "expected": {
+            "type": "exit",
+            "value": 1
+          }
+        }
+      ]
+    },
+    "./vigenere Hax0r2": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "rejects \"Hax0r2\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere Hax0r2"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "/opt/sandbox50/bin/run.sh: line 31: 29026 Segmentation fault      stdbuf --error=0 --output=0 \"$@\"\n"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": [
+              {}
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "checks": "2016.vigenere",
+  "id": "285abd7950544a71bd8394926bfc272b"
+}

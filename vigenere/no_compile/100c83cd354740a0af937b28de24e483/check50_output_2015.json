@@ -1,0 +1,100 @@
+{
+  "results": {
+    "exists": {
+      "dependencies": [],
+      "description": "vigenere.c exists",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "exists",
+            "value": "vigenere.c"
+          }
+        }
+      ]
+    },
+    "compiles": {
+      "dependencies": [
+        "exists"
+      ],
+      "description": "vigenere.c compiles",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "vigenere.c:17:18: error: use of undeclared identifier 'i'\n   while isalpha(i[s]) = true{\n                 ^\n/usr/include/ctype.h:199:32: note: expanded from macro 'isalpha'\n# define isalpha(c)     __isctype((c), _ISalpha)\n                                   ^\n/usr/include/ctype.h:90:31: note: expanded from macro '__isctype'\n  ((*__ctype_b_loc ())[(int) (c)] & (unsigned short int) type)\n                              ^\nvigenere.c:17:24: error: expected expression\n   while isalpha(i[s]) = true{\n                       ^\nvigenere.c:29:8: error: expected parameter declarator\nprintf(\"\\n\"); \n       ^\nvigenere.c:29:8: error: expected ')'\nvigenere.c:29:7: note: to match this '('\nprintf(\"\\n\"); \n      ^\nvigenere.c:29:1: warning: type specifier missing, defaults to 'int' [-Wimplicit-int]\nprintf(\"\\n\"); \n^~~~~~\nvigenere.c:29:1: error: conflicting types for 'printf'\n/usr/include/stdio.h:362:12: note: previous declaration is here\nextern int printf (const char *__restrict __format, ...);\n           ^\nvigenere.c:30:1: error: expected identifier or '('\nreturn 0;         \n^\nvigenere.c:31:1: error: extraneous closing brace ('}')\n}\n^\n1 warning and 7 errors generated.\n"
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        }
+      ]
+    },
+    "./vigenere a": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"a\" as \"a\" using \"a\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vigenere baz": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"world, say hello!\" as \"xoqmd, rby gflkp!\" using \"baz\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vigenere BaZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BaRFoo\" as \"CaQGon\" using \"BaZ\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vigenere BAZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BARFOO\" as \"CAQGON\" using \"BAZ\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vignere": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles lack of argv[1]",
+      "result": null,
+      "script": []
+    },
+    "./vigenere 1 2 3": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles argc > 2",
+      "result": null,
+      "script": []
+    },
+    "./vigenere Hax0r2": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "rejects \"Hax0r2\" as keyword",
+      "result": null,
+      "script": []
+    }
+  },
+  "checks": "2015.fall.pset2.vigenere",
+  "id": "e0ac7c1b77994cc48f93c005ff61dde1"
+}

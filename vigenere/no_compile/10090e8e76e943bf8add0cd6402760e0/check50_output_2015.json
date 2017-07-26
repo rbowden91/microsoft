@@ -1,0 +1,100 @@
+{
+  "results": {
+    "exists": {
+      "dependencies": [],
+      "description": "vigenere.c exists",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "exists",
+            "value": "vigenere.c"
+          }
+        }
+      ]
+    },
+    "compiles": {
+      "dependencies": [
+        "exists"
+      ],
+      "description": "vigenere.c compiles",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "stderr",
+            "value": "vigenere.c:33:16: error: expected ';' after expression\n      else(y>0)\n               ^\n               ;\nvigenere.c:33:13: warning: expression result unused [-Wunused-value]\n      else(y>0)\n           ~^~\n1 warning and 1 error generated.\n"
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        }
+      ]
+    },
+    "./vigenere a": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"a\" as \"a\" using \"a\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vigenere baz": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"world, say hello!\" as \"xoqmd, rby gflkp!\" using \"baz\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vigenere BaZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BaRFoo\" as \"CaQGon\" using \"BaZ\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vigenere BAZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BARFOO\" as \"CAQGON\" using \"BAZ\" as keyword",
+      "result": null,
+      "script": []
+    },
+    "./vignere": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles lack of argv[1]",
+      "result": null,
+      "script": []
+    },
+    "./vigenere 1 2 3": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles argc > 2",
+      "result": null,
+      "script": []
+    },
+    "./vigenere Hax0r2": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "rejects \"Hax0r2\" as keyword",
+      "result": null,
+      "script": []
+    }
+  },
+  "checks": "2015.fall.pset2.vigenere",
+  "id": "fd3b3f387c204ed7b5b276baeb52aa3f"
+}

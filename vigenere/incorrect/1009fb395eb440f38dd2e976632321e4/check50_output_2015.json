@@ -1,0 +1,371 @@
+{
+  "results": {
+    "exists": {
+      "dependencies": [],
+      "description": "vigenere.c exists",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "exists",
+            "value": "vigenere.c"
+          }
+        }
+      ]
+    },
+    "compiles": {
+      "dependencies": [
+        "exists"
+      ],
+      "description": "vigenere.c compiles",
+      "result": true,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        }
+      ]
+    },
+    "./vigenere a": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"a\" as \"a\" using \"a\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere a"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdin"
+          },
+          "expected": {
+            "type": "stdin",
+            "value": "a\n"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdout",
+            "value": "a"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^(a\\n)$/"
+          },
+          "suggestions": []
+        }
+      ]
+    },
+    "./vigenere baz": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"world, say hello!\" as \"xoqmd, rby gflkp!\" using \"baz\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere baz"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdin"
+          },
+          "expected": {
+            "type": "stdin",
+            "value": "world, say hello!\n"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdout",
+            "value": "xoqmd, rby gflkp!"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^(xoqmd, rby gflkp!\\n)$/"
+          },
+          "suggestions": []
+        }
+      ]
+    },
+    "./vigenere BaZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BaRFoo\" as \"CaQGon\" using \"BaZ\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere BaZ"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdin"
+          },
+          "expected": {
+            "type": "stdin",
+            "value": "BaRFoo\n"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdout",
+            "value": "CaQGon"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^(CaQGon\\n)$/"
+          },
+          "suggestions": []
+        }
+      ]
+    },
+    "./vigenere BAZ": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "encrypts \"BARFOO\" as \"CAQGON\" using \"BAZ\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere BAZ"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdin"
+          },
+          "expected": {
+            "type": "stdin",
+            "value": "BARFOO\n"
+          }
+        },
+        {
+          "actual": {
+            "type": "stdout",
+            "value": "CAQGON"
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^(CAQGON\\n)$/"
+          },
+          "suggestions": []
+        }
+      ]
+    },
+    "./vignere": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles lack of argv[1]",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 1
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^([\\s\\S]*)$/"
+          }
+        }
+      ]
+    },
+    "./vigenere 1 2 3": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "handles argc > 2",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere 1 2 3"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 1
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^([\\s\\S]*)$/"
+          }
+        }
+      ]
+    },
+    "./vigenere Hax0r2": {
+      "dependencies": [
+        "compiles"
+      ],
+      "description": "rejects \"Hax0r2\" as keyword",
+      "result": false,
+      "script": [
+        {
+          "expected": {
+            "type": "run",
+            "value": "clang -o vigenere vigenere.c -lcs50 -lm"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 0
+          },
+          "expected": {
+            "type": "exit",
+            "value": 0
+          }
+        },
+        {
+          "expected": {
+            "type": "run",
+            "value": "./vigenere Hax0r2"
+          }
+        },
+        {
+          "actual": {
+            "type": "exit",
+            "value": 1
+          },
+          "expected": {
+            "type": "stdout",
+            "value": "/^([\\s\\S]*)$/"
+          }
+        }
+      ]
+    }
+  },
+  "checks": "2015.fall.pset2.vigenere",
+  "id": "fd1c7245b258402d9e53113822181e66"
+}
