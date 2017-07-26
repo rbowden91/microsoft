@@ -133,7 +133,7 @@ class IDRenamer(c_generator.CGenerator):
             return self.visit(n)
 
 def preprocess_c(filename, rename_ids=False, truncate_strings=False):
-    ast = parse_file(filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../utils/fake_libc_include'])
+    ast = parse_file(filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
     generator = IDRenamer(rename_ids, truncate_strings)
     generator.visit(ast)
     return generator.func_strs

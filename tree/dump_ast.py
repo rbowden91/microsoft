@@ -66,6 +66,6 @@ if __name__ == "__main__":
     argparser.add_argument('filename', help='name of file to parse')
     args = argparser.parse_args()
 
-    ast = parse_file(args.filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../utils/fake_libc_include'])
+    ast = parse_file(args.filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
     print(print_ast(ast))
 

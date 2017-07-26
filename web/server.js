@@ -23,13 +23,14 @@ var timeout_interval = 0.01;
 var files = {};
 
 function parse_results(file) {
-    var results_file = '/mnt/e/server_tasks/.' + file + '-results'
+    // XXX make this a Command Line Arg
+    var results_file = '../tasks/.' + file + '-results'
     if (!fs.existsSync(results_file)) {
     	files[file].retries++;
         if (files[file].retries * timeout_interval > max_timeout) {
             try {
 		files[file].socket.emit('response', { success:false, results: 'Server took too long to respond!' });
-		fs.unlinkSync('/mnt/e/server_tasks/' + file);
+		fs.unlinkSync('../tasks/' + file);
 		fs.unlinkSync(results_file);
 	    } catch(e) {console.log(e)}
             delete(files[file])
@@ -54,7 +55,7 @@ io.on('connection', function(socket){
   socket.on('code', function(msg){
     file = uuid() + '.c';
     files[file] = {'socket': socket, 'retries': 0}
-    fs.writeFileSync('/mnt/e/server_tasks/' + file, msg);
+    fs.writeFileSync('../tasks/' + file, msg);
     setTimeout(function() { parse_results(file) }, timeout_interval);
   });
 });

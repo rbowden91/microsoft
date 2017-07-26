@@ -20,8 +20,6 @@ flags.DEFINE_string("save_path", None,
 flags.DEFINE_bool("use_fp16", False,
                   "Train using 16-bit floats instead of 32bit floats")
 
-# XXX ROB
-# XXX USE OS.JOIN EVERYWHERE
 flags.DEFINE_string("data_path", None,
                     "XXX")
 flags.DEFINE_string("task_path", None,
@@ -54,10 +52,9 @@ def print_ast(ast, node_properties):
 def run_epoch(session, graph, config, ast, raw_data):
     fetches = {}
     for k in config['fetches']:
-        # XXX fetches[k] = graph.get_tensor_by_name(config['fetches'][k])
         fetches[k] = config['fetches'][k]
 
-    # XXX do this once, instead of in each run_epoch
+    # TODO: do this once, instead of in each run_epoch
     initial_states = {}
     for k in config['initial_states']:
         initial_states[k] = []
@@ -76,10 +73,12 @@ def run_epoch(session, graph, config, ast, raw_data):
         children = node.children()
 
         feed_dict = {
-            # XXX that first index?
+            # the 0th index represents the empty sibling/parent, so the actual data for this node should
+            # go in the 1st
             config['placeholders']['is_leaf']: [0, 1 if len(children) == 0 else 0],
             config['placeholders']['last_sibling']: [0, 1 if last_sibling else 0],
-            # XXX should have an <unk>
+
+            # XXX should have an <unk>. This will fail if something unexpected is found
             # need the parent token to feed it into the LSTM Cell
             config['placeholders']['node_index']: [0, raw_data['token_to_id'][node.__class__.__name__]],
 
@@ -129,7 +128,6 @@ def run_epoch(session, graph, config, ast, raw_data):
                 next_sibling = children[i][1]
         return True
 
-    # XXX Can add initial state to parent_states and sibling_states
     visit_tree(ast, True, None, None)
     return node_properties
 
@@ -153,57 +151,51 @@ def run_epoch(session, graph, config, ast, raw_data):
 
 
 def main(_):
+    directory = os.path.dirname(os.path.realpath(__file__))
+    os.chdir(directory)
 
-  directory = os.path.dirname(os.path.realpath(__file__))
-  os.chdir(directory)
+    raw_data = dict()
+    with open(os.path.join(FLAGS.data_path, 'tree_tokens.json')) as f:
+        raw_data['token_to_id'] = json.load(f)
 
-  raw_data = dict()
-  with open(FLAGS.data_path + '/tree_tokens.json') as f:
-    raw_data['token_to_id'] = json.load(f)
+    raw_data['id_to_token'] = dict()
+    for k in raw_data['token_to_id']:
+        raw_data['id_to_token'][raw_data['token_to_id'][k]] = k
 
-  raw_data['id_to_token'] = dict()
-  for k in raw_data['token_to_id']:
-    raw_data['id_to_token'][raw_data['token_to_id'][k]] = k
+    with open(os.path.join(FLAGS.save_path, "tree_training_config.json")) as f:
+        config = json.load(f)
 
-  with open(os.path.join(FLAGS.save_path, "tree_training_config.json")) as f:
-      config = json.load(f)
+    with tf.Graph().as_default() as graph:
+        saver = tf.train.import_meta_graph(os.path.join(FLAGS.save_path, "tree_model.meta"))
 
-  #config['batch_size'] = 1
-  #config['num_steps'] = 1
+        with tf.Session() as session:
+            saver.restore(session, os.path.join(FLAGS.save_path, 'tree_model'))
 
-  with tf.Graph().as_default() as graph:
-    saver = tf.train.import_meta_graph(os.path.join(FLAGS.save_path, "tree_model.meta"))
+            while True:
+                for filename in os.listdir(FLAGS.task_path):
+                    if filename.startswith('.'):
+                        continue
+                    try:
+                        ast = parse_file(os.path.join(FLAGS.task_path, filename), use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
+                    except Exception:
+                        # TODO: return some kind of error about failure to parse
+                        continue
 
-    with tf.Session() as session:
-      saver.restore(session, os.path.join(FLAGS.save_path, 'tree_model'))
+                    node_properties = run_epoch(session, graph, config, ast, raw_data)
+                    output = print_ast(ast, node_properties)
 
-      while True:
-        for filename in os.listdir(FLAGS.task_path):
-          if filename.startswith('.'):
-            continue
-          # XXX XXX add try-catch
-          ast = parse_file(FLAGS.task_path + filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../utils/fake_libc_include'])
-          #test_ids.reverse()
+                    with open(os.path.join(FLAGS.task_path, '.' + filename + '-results-tmp'), 'w') as f:
+                        json.dump(output, f)
 
-          node_properties = run_epoch(session, graph, config, ast, raw_data)
-          output = print_ast(ast, node_properties)
-          #output.reverse()
+                    # make the output file appear atomically
+                    os.rename(os.path.join(FLAGS.task_path, '.' + filename + '-results-tmp'),
+                              os.path.join(FLAGS.task_path, '.' + filename + '-results'));
 
-          with open(FLAGS.task_path + '.' + filename + '-results-tmp', 'w') as f:
-              json.dump(output, f)
-
-          # make the output file appear atomically
-          os.rename(FLAGS.task_path + '.' + filename + '-results-tmp', FLAGS.task_path + '.' + filename + '-results');
-
-          try:
-            os.unlink(FLAGS.task_path + filename)
-          except FileNotFoundError:
-            pass
-        time.sleep(0.01)
-
-    # XXX this isn't fixing the error messages about cancelled enqueue attempts...
-    #coord.request_stop()
-    #coord.join(threads)
+                    try:
+                        os.unlink(os.path.join(FLAGS.task_path, filename))
+                    except FileNotFoundError:
+                        pass
+                time.sleep(0.01)
 
 if __name__ == "__main__":
     tf.app.run()
