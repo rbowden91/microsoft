@@ -24,6 +24,22 @@ config = {
     'num_files': 100#None
 }
 
+def tokens_to_ids(tokens, token_to_id, include_token):
+    output = []
+    for i in range(len(tokens)):
+        output.append([])
+        # XXX XXX XXX Check if this still works in training
+        for j in range(len(tokens[i])):
+            token = tokens[i][j]
+            if token in token_to_id:
+                id = token_to_id[token]
+            #elif token.startswith('"'):
+            #    id = token_to_id['<unk_str>']
+            else:
+                id = token_to_id['<unk_attr>']
+            output[i].append((id, token) if include_token else id)
+    return output
+
 def process_queue(queues, lexicon, lock):
     keys = list(queues.keys())
     random.shuffle(keys)
@@ -32,7 +48,7 @@ def process_queue(queues, lexicon, lock):
         while not queues[key]['queue'].empty():
             file = queues[key]['queue'].get()
             print(file)
-            with open(file + '/tree_stripped.json') as f:
+            with open(os.path.join(file, 'tree_stripped.json')) as f:
                 data = json.load(f)
             new_row = dict()
             for k in queues[key]:
@@ -40,15 +56,33 @@ def process_queue(queues, lexicon, lock):
                 new_row[k] = [0]
             del(new_row['queue'])
 
+            file_lexicon = set()
             for i in range(len(data)):
                 token = data[i]['name']
-                with lock:
-                    if token not in lexicon:
-                        lexicon[token] = len(lexicon)
-                data[i]['token'] = lexicon[token]
+                if key == "train":
+                    with lock:
+                        if token not in lexicon['ast_labels']:
+                            lexicon['ast_labels'][token] = len(lexicon['ast_labels'])
+                token = token if token in lexicon['ast_labels'] else '<unk_label>'
+                data[i]['token'] = lexicon['ast_labels'][token]
+                for (name, val) in data[i]['attrs']:
+                    if name in ['value', 'op', 'name']:
+                        if key == "train":
+                            with lock:
+                                if val not in lexicon['label_attrs']:
+                                    lexicon['label_attrs'][val] = 0
+                                # only add once per file
+                                if val not in file_lexicon:
+                                    lexicon['label_attrs'][val] += 1
+                                    file_lexicon.add(val)
+                        data[i]['attr'] = val
+                        # XXX strongly assumes only one, for now!!!
+                        break
+                else:
+                    data[i]['attr'] = '<no_attr>'
+
                 for k in new_row:
-                    # XXX get rid of true/false from parse.sh, then we don't need "int"
-                    new_row[k].append(int(data[i][k]))
+                    new_row[k].append(int(data[i][k]) if isinstance(data[i][k], bool) else data[i][k])
 
 
             with lock:
@@ -81,7 +115,8 @@ def main(path):
             'sibling': [],
             'parent': [],
             'leaf_node': [],
-            'last_sibling': []
+            'last_sibling': [],
+            'attr': []
         }
 
     for i in range(config['num_files']):
@@ -92,7 +127,7 @@ def main(path):
         else:
             queues['test']['queue'].put(files[i])
 
-    lexicon = {'<nil>': 0}
+    lexicon = { 'ast_labels': {'<nil>': 0, '<unk_label>': 1}, 'label_attrs': {'<no_attr>': sys.maxsize }}
     lock = Lock()
 
     threads = []
@@ -111,23 +146,27 @@ def main(path):
     for i in queues:
         del(queues[i]['queue'])
 
-    #cutoff = config['num_files'] * config['train_fraction'] * config['unk_cutoff']
-    #tokens = set([token for lst in queues['train']['tokens'] for token in lst if lexicon[token] > cutoff])
+    cutoff = config['num_files'] * config['train_fraction'] * config['unk_cutoff']
+    tokens = set([token for token in lexicon['label_attrs'] if lexicon['label_attrs'][token] > cutoff])
 
-    #token_to_id = dict(zip(tokens, range(len(tokens))))
-    #token_to_id['<unk>'] = len(token_to_id)
-    #token_to_id['<unk_str>'] = len(token_to_id)
+    lexicon['label_attrs'] = dict(zip(tokens, range(len(tokens))))
+    lexicon['label_attrs']['<unk_attr>'] = len(lexicon['label_attrs'])
+
+    for i in queues:
+        queues[i]['attr'] = tokens_to_ids(queues[i]['attr'], lexicon['label_attrs'], False)
 
     # XXX make this a flag
-    with open(path + '/tree_train.json', 'w') as f:
+    if not os.path.isdir(path):
+        os.makedirs(path)
+    with open(os.path.join(path, 'tree_train.json'), 'w') as f:
         json.dump(queues['train'], f)
-    with open(path + '/tree_valid.json', 'w') as f:
+    with open(os.path.join(path, 'tree_valid.json'), 'w') as f:
         json.dump(queues['valid'], f)
-    with open(path + '/tree_test.json', 'w') as f:
+    with open(os.path.join(path, 'tree_test.json'), 'w') as f:
         json.dump(queues['test'], f)
-    with open(path + '/tree_tokens.json', 'w') as f:
+    with open(os.path.join(path, 'tree_tokens.json'), 'w') as f:
         json.dump(lexicon, f)
-    with open(path + '/tree_config.json', 'w') as f:
+    with open(os.path.join(path, 'tree_config.json'), 'w') as f:
         json.dump(config, f)
 
 if __name__ == "__main__":

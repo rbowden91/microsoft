@@ -6,6 +6,7 @@ import inspect
 import time
 import json
 import os
+import tree_read
 
 from pycparser import c_parser, c_ast, parse_file
 
@@ -37,9 +38,12 @@ def print_ast(ast, node_properties):
         "children": []
     }
 
-    for k in ['expected_probability', 'target_probability', 'ratio', 'p_a', 'p_f']:
+    for k in ['expected_probability', 'target_probability', 'ratio', 'p_a', 'p_f', 'attr_expected_probability',
+              'attr_target_probability', 'attr_ratio']:
         output[k] = float(node_properties[ast][k])
     output['expected'] = node_properties[ast]['expected']
+    output['attr_expected'] = node_properties[ast]['attr_expected']
+    output['attr_actual'] = node_properties[ast]['attr_actual']
 
     children = ast.children()
     for i in range(len(children)):
@@ -82,6 +86,9 @@ def run_epoch(session, graph, config, ast, raw_data):
             # need the parent token to feed it into the LSTM Cell
             config['placeholders']['node_index']: [0, raw_data['token_to_id'][node.__class__.__name__]],
 
+            # 2nd 0 is a placeholder, changed below
+            config['placeholders']['attr_index']: [0, 0],
+
             # these are specific to inference
             config['placeholders']['is_inference']: True,
             config['placeholders']['inference_parent']: raw_data['token_to_id'][parent.__class__.__name__] if parent is not None else 0,
@@ -91,6 +98,16 @@ def run_epoch(session, graph, config, ast, raw_data):
             config['placeholders']['parent']: [0, 0],
             config['placeholders']['sibling']: [0, 0]
         }
+
+        nvlist = [(n, getattr(node, n)) for n in node.attr_names]
+        for (name, val) in nvlist:
+            if name in ['value', 'op', 'name']:
+                feed_dict[config['placeholders']['attr_index']][1] = tree_read.tokens_to_ids([[val]],
+                        raw_data['attr_to_id'], False)[0][0]
+                break
+        else:
+            feed_dict[config['placeholders']['attr_index']][1] = raw_data['attr_to_id']['<no_attr>']
+
 
         for i in range(len(config['initial_states']['sibling'])):
             feed_dict[config['initial_states']['sibling'][i]['c']] = node_properties[sibling]['states']['sibling'][i]['c'] if sibling is not None else initial_states['sibling'][i].c
@@ -111,14 +128,26 @@ def run_epoch(session, graph, config, ast, raw_data):
         node_properties[node]['expected_probability'] = probabilities[expected_id]
 
         # XXX again, possibly <unk>
-        target_id = raw_data['token_to_id'][node.__class__.__name__]
+        #target_id = raw_data['token_to_id'][node.__class__.__name__]
+        target_id = feed_dict[config['placeholders']['node_index']][1]
         node_properties[node]['target_probability'] = probabilities[target_id]
 
         node_properties[node]['ratio'] = probabilities[target_id] / probabilities[expected_id]
 
+        node_properties[node]['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
+        attr_expected_id = np.argmax(attr_probabilities)
+        node_properties[node]['attr_expected'] = raw_data['id_to_attr'][attr_expected_id]
+        node_properties[node]['attr_expected_probability'] = attr_probabilities[attr_expected_id]
+        attr_target_id = feed_dict[config['placeholders']['attr_index']][1]
+        node_properties[node]['attr_actual'] = raw_data['id_to_attr'][attr_target_id]
+        node_properties[node]['attr_target_probability'] = attr_probabilities[attr_target_id]
+
+        node_properties[node]['attr_ratio'] = attr_probabilities[attr_target_id] / attr_probabilities[attr_expected_id]
+
+
         # XXX these can be negative. how to make them probabilities?
-        node_properties[node]['p_a'] = vals['logits_p_a'][0]
-        node_properties[node]['p_f'] = vals['logits_p_f'][0]
+        node_properties[node]['p_a'] = vals['predicted_p_a']
+        node_properties[node]['p_f'] = vals['predicted_p_f']
         node_properties[node]['states'] = vals['states']
 
         next_sibling = None
@@ -156,11 +185,17 @@ def main(_):
 
     raw_data = dict()
     with open(os.path.join(FLAGS.data_path, 'tree_tokens.json')) as f:
-        raw_data['token_to_id'] = json.load(f)
+        token_ids = json.load(f)
+        raw_data['token_to_id'] = token_ids['ast_labels']
+        raw_data['attr_to_id'] = token_ids['label_attrs']
 
     raw_data['id_to_token'] = dict()
     for k in raw_data['token_to_id']:
         raw_data['id_to_token'][raw_data['token_to_id'][k]] = k
+
+    raw_data['id_to_attr'] = dict()
+    for k in raw_data['attr_to_id']:
+        raw_data['id_to_attr'][raw_data['attr_to_id'][k]] = k
 
     with open(os.path.join(FLAGS.save_path, "tree_training_config.json")) as f:
         config = json.load(f)

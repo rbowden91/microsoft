@@ -13,9 +13,11 @@ import json
 
 from pycparser import c_parser, c_ast, parse_file
 
-def print_ast(ast, attrnames=False, parent=0, sibling=0, my_number=1, last_sibling=True):
+def print_ast(ast, parent=0, sibling=0, my_number=1, last_sibling=True):
     if ast.__class__.__name__ == 'Typedef' or ast.__class__.__name__ == 'Decl' or ast.__class__.__name__ == 'TypeDecl' or ast.__class__.__name__ == 'DeclList':
         return False
+
+    nvlist = [(n, getattr(ast,n)) for n in ast.attr_names]
 
     children = ast.children()
     node = {
@@ -24,32 +26,36 @@ def print_ast(ast, attrnames=False, parent=0, sibling=0, my_number=1, last_sibli
         'parent': parent,
         'sibling': sibling,
         'last_sibling': last_sibling,
-        'leaf_node': len(children) == 0
+        'leaf_node': len(children) == 0,
+        'attrs': nvlist
     }
     ret = [node]
-
-    #if nodenames and _my_node_name is not None:
-    #    buf.write(lead + ast.__class__.__name__+ ' <' + _my_node_name + '>: ')
-    #else:
-    #    buf.write(lead + ast.__class__.__name__+ ' ')
-
-    if ast.attr_names:
-        if attrnames:
-            nvlist = [(n, getattr(ast,n)) for n in ast.attr_names]
-            #attrstr = ', '.join('%s=%s' % nv for nv in nvlist)
-            attrstr = ' '.join('%s=%s' % nv for nv in nvlist)
-        else:
-            vlist = [getattr(ast, n) for n in ast.attr_names]
-            #attrstr = ', '.join('%s' % v for v in vlist)
-            attrstr = ' '.join('%s' % v for v in vlist)
-
-    sibling = 0
     new_number = my_number + 1
+    sibling = 0
+
+    # handle attrs
+    #for (name, val) in nvlist:
+    #    if name in ['value', 'op', 'name']:# and ast.__class__.__name__ != 'ID':
+    #        node['name'] = val
+    #        ret[-1]['leaf_node'] = False
+    #        new_node = {
+    #            'name': val,
+    #            'node_number': new_number,
+    #            'parent': my_number,
+    #            'sibling': sibling,
+    #            'last_sibling': 0, # for ID probably true, for binop/func, false
+    #            'leaf_node': True,
+    #            #'attrs': nvlist
+    #        }
+    #        ret.append(new_node)
+    #        sibling = new_number
+    #        new_number += 1
+
+    # actual children
     for i in range(len(children)):
         (child_name, child) = children[i]
         child_result = print_ast(
             child,
-            attrnames=attrnames,
             parent=my_number,
             sibling=sibling,
             my_number=new_number,
@@ -67,5 +73,5 @@ if __name__ == "__main__":
     args = argparser.parse_args()
 
     ast = parse_file(args.filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
-    print(print_ast(ast))
+    print(json.dumps(print_ast(ast)))
 

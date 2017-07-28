@@ -8,6 +8,7 @@ from __future__ import print_function
 import inspect
 import time
 import json
+import os
 
 import numpy as np
 import tensorflow as tf
@@ -91,6 +92,7 @@ class TRNNModel(object):
   def __init__(self, is_training, config):
     size = config['hidden_size']
     vocab_size = config['vocab_size']
+    attr_size = config['attr_vocab_size']
 
     # declare a bunch of parameters that will be reused later
     with tf.variable_scope('Parameters', reuse=False):
@@ -99,10 +101,14 @@ class TRNNModel(object):
         U_a = tf.get_variable('U_a', [size, size], dtype=tf.float32)
         u_f = tf.get_variable('u_f', [size], dtype=tf.float32)
         u_a = tf.get_variable('u_a', [size], dtype=tf.float32)
+        attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
+        attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
+        v_attr = tf.get_variable("v_attr", [vocab_size, attr_size], dtype=data_type())
+
         softmax_w = tf.get_variable("softmax_w", [size, vocab_size], dtype=data_type())
         softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
-        v_a = tf.get_variable("v_a", 1, dtype=data_type())
-        v_f = tf.get_variable("v_f", 1, dtype=data_type())
+        v_a = tf.get_variable("v_a", [vocab_size], dtype=data_type())
+        v_f = tf.get_variable("v_f", [vocab_size], dtype=data_type())
 
     def lstm_cell():
         return tf.contrib.rnn.BasicLSTMCell(
@@ -120,6 +126,8 @@ class TRNNModel(object):
         tf.int32, [None], name='last_sibling_placeholder')
     self.node_index_placeholder = tf.placeholder(
         tf.int32, [None], name='node_index_placeholder')
+    self.attr_index_placeholder = tf.placeholder(
+        tf.int32, [None], name='attr_index_placeholder')
 
     config['dependencies'] = dependencies = ['sibling', 'parent']
 
@@ -139,6 +147,7 @@ class TRNNModel(object):
             'is_leaf': self.is_leaf_placeholder.name,
             'last_sibling': self.last_sibling_placeholder.name,
             'node_index': self.node_index_placeholder.name,
+            'attr_index': self.attr_index_placeholder.name,
             'is_inference': self.is_inference.name
         }
         for k in config['dependencies']:
@@ -214,13 +223,14 @@ class TRNNModel(object):
     #  inputs = tf.nn.dropout(inputs, config['keep_prob'])
 
     # this returns true as long as the loop counter is less than the length of the example
-    loop_cond = lambda loss, ctr, dependency_states, label_prob, lpa, lpf: \
+    loop_cond = lambda loss, ctr, dependency_states, label_prob, attr_prob, lpa, lpf: \
         tf.less(ctr, tf.squeeze(tf.shape(self.is_leaf_placeholder)))
 
-    def loop_body(loss, ctr, dependency_states, label_prob, lpa, lpf):
-        is_leaf = tf.gather(self.is_leaf_placeholder, ctr, name="IsLeafGather")
-        last_sibling = tf.gather(self.last_sibling_placeholder, ctr, name="LastSiblingGather")
+    def loop_body(loss, ctr, dependency_states, label_prob, attr_prob, lpa, lpf):
+        is_leaf = tf.cast(tf.gather(self.is_leaf_placeholder, ctr, name="IsLeafGather"), tf.float32)
+        last_sibling = tf.cast(tf.gather(self.last_sibling_placeholder, ctr, name="LastSiblingGather"), tf.float32)
         node_index = tf.gather(self.node_index_placeholder, ctr, name="NodeIndexGather")
+        attr_index = tf.gather(self.attr_index_placeholder, ctr, name="AttrIndexGather")
 
         outputs = {}
 
@@ -268,69 +278,83 @@ class TRNNModel(object):
             U_a = tf.get_variable('U_a', [size, size], dtype=tf.float32)
             u_f = tf.get_variable('u_f', [size], dtype=tf.float32)
             u_a = tf.get_variable('u_a', [size], dtype=tf.float32)
+            attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
+            attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
+            v_attr = tf.get_variable("v_attr", [vocab_size, attr_size], dtype=data_type())
+
             softmax_w = tf.get_variable("softmax_w", [size, vocab_size], dtype=data_type())
             softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
-            v_a = tf.get_variable("v_a", 1, dtype=data_type())
-            v_f = tf.get_variable("v_f", 1, dtype=data_type())
+            #v_a = tf.get_variable("v_a", [vocab_size], dtype=data_type())
+            v_f = tf.get_variable("v_f", [vocab_size], dtype=data_type())
 
         # this is the vector that combines the sibling and parent hidden states to be directly used in prediction
         # TODO: generalize this in terms of "dependencies"
         h_pred = tf.matmul(outputs['sibling'], U_f) + tf.matmul(outputs['parent'], U_a)
 
+        # predict whether there is a child node (a = ancestor)
+        logits_p_a = tf.reduce_sum(tf.multiply(u_a, h_pred))
+        predicted_p_a = tf.sigmoid(logits_p_a)
+        logits_p_a = tf.expand_dims(logits_p_a, 0)
+        actual_p_a = tf.expand_dims(is_leaf, 0)
+        # XXX paper uses sigmoid. How does this compare to cross entropy?
+        loss_p_a = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_a, labels=actual_p_a, name="p_a_loss")
 
-        # XXX paper uses sigmoid
-        #p_a = tf.sigmoid(tf.reduce_sum(tf.multiply(u_a, h_pred)))
-        #p_f = tf.sigmoid(tf.reduce_sum(tf.multiply(u_f, h_pred)))
-
-        # XXX XXX XXX are these between zero and 1?
-        logits_p_a = tf.expand_dims(tf.reduce_sum(tf.multiply(u_a, h_pred)), 0)
-        logits_p_f = tf.expand_dims(tf.reduce_sum(tf.multiply(u_f, h_pred)), 0)
-
-        actual_p_a = tf.expand_dims(is_leaf, 0)#tf.one_hot(is_leaf, 2), 0)
-        loss_p_a = tf.nn.softmax_cross_entropy_with_logits(logits=logits_p_a, labels=actual_p_a, name="p_a_loss")
-
-        actual_p_f = tf.expand_dims(last_sibling, 0)#tf.one_hot(last_sibling, 2), 0)
-        loss_p_f = tf.nn.softmax_cross_entropy_with_logits(logits=logits_p_f, labels=actual_p_f, name="p_f_loss")
+        # predict where there is a sibling node (f = fraternal)
+        logits_p_f = tf.reduce_sum(tf.multiply(u_f, h_pred))
+        predicted_p_f = tf.sigmoid(logits_p_f)
+        logits_p_f = tf.expand_dims(logits_p_f, 0)
+        actual_p_f = tf.expand_dims(last_sibling, 0)
+        # TODO: paper uses sigmoid. How does this compare to cross entropy?
+        loss_p_f = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_f, labels=actual_p_f, name="p_f_loss")
 
 
-        # XXX XXX XXX need to add in post-comment
+        # XXX Testing shouldn't necessarily use is_leaf and last_sibling directly, according to paper?
         # TODO: The paper doesn't seem to have a bias term. Could compare with and without
-        label_logits = tf.matmul(h_pred, softmax_w) + softmax_b # + v_a . is_leaf + v_b . last_sibling
+        #label_logits = tf.matmul(h_pred, softmax_w) + softmax_b + tf.multiply(v_a, is_leaf) + tf.multiply(v_f, last_sibling)
+        label_logits = tf.matmul(h_pred, softmax_w) + softmax_b + tf.multiply(v_f, last_sibling)
 
         # XXX name things...
         label_probabilities = tf.nn.softmax(label_logits)
-
         actual_label = tf.one_hot(node_index, vocab_size)
-
         # TODO: switch this to use sparse_softmax?
         label_loss = tf.nn.softmax_cross_entropy_with_logits(logits=label_logits, labels=actual_label, name="label_loss")
 
+        attr_logits = tf.matmul(h_pred, attr_w) + attr_b + tf.matmul(tf.expand_dims(actual_label, 0), v_attr)
+        attr_probabilities = tf.nn.softmax(attr_logits)
+        actual_attr = tf.one_hot(attr_index, attr_size)
+        attr_loss = tf.nn.softmax_cross_entropy_with_logits(logits=attr_logits, labels=actual_attr, name="attr_loss")
+
+
         # TODO: could differ the weights for structural predictions vs the label predictions when calculating loss
         #loss = tf.add(loss, tf.reduce_sum(loss_p_a))
-        #loss = tf.add(loss, tf.reduce_sum(loss_p_f))
+        loss = tf.add(loss, tf.reduce_sum(loss_p_f))
+        loss = tf.add(loss, tf.reduce_sum(attr_loss))
         loss = tf.add(loss, tf.reduce_sum(label_loss))
 
         ctr = tf.add(ctr, 1)
 
-        return loss, ctr, dependency_states, label_probabilities, logits_p_a, logits_p_f
+        return loss, ctr, dependency_states, label_probabilities, attr_probabilities, predicted_p_a, predicted_p_f
 
     # start iterating from 1, since 0 is the "empty" parent/sibling
-    # XXX the tf.zeros are just there because we need a tensor of the correct size. better way?
-    loss, _, dependency_states, label_probabilities, logits_p_a, logits_p_f = tf.while_loop(loop_cond, loop_body,
+    # The last four arguments we need to "return" from the while loop, so that inference can use them directly
+    # XXX the last three args are just there because we need a tensor of the correct size. better way?
+    loss, _, dependency_states, label_probabilities, attr_probabilities, predicted_p_a, predicted_p_f = tf.while_loop(loop_cond, loop_body,
         [0.0, # loss
          1, # ctr
          dependency_states, # dependency_states
          tf.zeros([1,vocab_size], tf.float32), # label_probabilities
-         tf.zeros(1, tf.float32), # logits_p_a
-         tf.zeros(1, tf.float32)], # logits_p_f
+         tf.zeros([1,attr_size], tf.float32), # attr_probabilities
+         0.0, # predicted_p_a
+         0.0], # predicted_p_f
         parallel_iterations=1)
 
     # save some more tensor names for us to use in inference
     if is_training:
         config['fetches'] = {
-            'logits_p_a': logits_p_a.name,
-            'logits_p_f': logits_p_f.name,
+            'predicted_p_a': predicted_p_a.name,
+            'predicted_p_f': predicted_p_f.name,
             'label_probabilities': label_probabilities.name,
+            'attr_probabilities': attr_probabilities.name,
             'states': {}
         }
         for i in range(len(dependencies)):
@@ -408,6 +432,7 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
             model.is_leaf_placeholder: data['leaf_node'][step],
             model.last_sibling_placeholder: data['last_sibling'][step],
             model.node_index_placeholder: data['token'][step],
+            model.attr_index_placeholder: data['attr'][step],
             model.dependency_placeholders['sibling']: data['sibling'][step],
             model.dependency_placeholders['parent']: data['parent'][step],
 
@@ -452,17 +477,20 @@ def get_config():
 def main(_):
     # load in all the data
     raw_data = dict()
-    with open(os.join(FLAGS.data_path, 'tree_train.json')) as f:
+    with open(os.path.join(FLAGS.data_path, 'tree_train.json')) as f:
         raw_data['train'] = json.load(f)
-    with open(os.join(FLAGS.data_path,'tree_valid.json')) as f:
+    with open(os.path.join(FLAGS.data_path,'tree_valid.json')) as f:
         raw_data['valid'] = json.load(f)
-    with open(os.join(FLAGS.data_path,'tree_test.json')) as f:
+    with open(os.path.join(FLAGS.data_path,'tree_test.json')) as f:
         raw_data['test'] = json.load(f)
-    with open(os.join(FLAGS.data_path, 'tree_tokens.json')) as f:
-        raw_data['token_to_id'] = json.load(f)
+    with open(os.path.join(FLAGS.data_path, 'tree_tokens.json')) as f:
+        token_ids = json.load(f)
+        raw_data['token_to_id'] = token_ids['ast_labels']
+        raw_data['attr_to_id'] = token_ids['label_attrs']
 
     config = get_config()
     config['vocab_size'] = len(raw_data['token_to_id'])
+    config['attr_vocab_size'] = len(raw_data['attr_to_id'])
 
     eval_config = config.copy()
     #eval_config['batch_size'] = 1
@@ -509,8 +537,10 @@ def main(_):
             print("Test Perplexity: %.3f" % test_perplexity)
 
             if FLAGS.save_path:
-                saver.save(session, os.join(FLAGS.save_path, 'tree_model'))
-                with open(os.join(FLAGS.save_path, 'tree_training_config.json'), 'w') as f:
+                if not os.path.isdir(FLAGS.save_path):
+                    os.makedirs(FLAGS.save_path)
+                saver.save(session, os.path.join(FLAGS.save_path, 'tree_model'))
+                with open(os.path.join(FLAGS.save_path, 'tree_training_config.json'), 'w') as f:
                     json.dump(config, f)
 
 if __name__ == "__main__":

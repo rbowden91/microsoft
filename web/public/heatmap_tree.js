@@ -68,7 +68,6 @@ function generate_heatmap(data) {
 
 	if (i !== 0) {
 	    if (data[i][0] === "'")
-	    	console.log(data[i])
 	    output += "<span style='background-color:#" + gradient(grad, data[i-1].ratio) + "' data-expected=" +
 		      (data[i-1].expected === "'" ? "\"'\"" : ("'" + data[i-1].expected + "'")) +
 		      " data-ratio='" + data[i-1].ratio + "'" +
@@ -114,6 +113,8 @@ function generate_heatmap(data) {
 }
 
 function drawTree(treeData) {
+    // clear the previous tree
+    $("svg g").html("")
 
     // declares a tree layout and assigns the size
     var treemap = d3.tree()
@@ -136,6 +137,9 @@ function drawTree(treeData) {
 	    + "C" + d.x + "," + (d.y + d.parent.y) / 2
 	    + " " + d.parent.x + "," +  (d.y + d.parent.y) / 2
 	    + " " + d.parent.x + "," + d.parent.y;
+	})
+	.attr("style", function(d) {
+	    return "stroke:#" + gradient(grad, 1-d.data.p_f)
 	});
 
     // adds each node as a group
@@ -162,7 +166,16 @@ function drawTree(treeData) {
     // adds the text to the node
     node.append("text")
     .attr("dy", ".35em")
-    .attr("y", function(d) { return d.children ? -20 : 20; })
+    .attr("y", function(d) { return d.children ? -20 : 30; })
+    .style("text-anchor", "middle")
+    .text(function(d) { return d.data.attr_actual; })
+    .style("stroke", function(d) {
+    	return '#' + gradient(grad, d.data.attr_ratio)
+    });
+
+    node.append("text")
+    .attr("dy", ".35em")
+    .attr("y", function(d) { return d.children ? -30 : 20; })
     .style("text-anchor", "middle")
     .text(function(d) { return d.data.name; })
     .on('click', function(d) {
@@ -171,6 +184,13 @@ function drawTree(treeData) {
         $('#expectation-ratio').text(d.data.ratio);
         $('#expectation-target-prob').text(d.data.target_probability);
         $('#expectation-max-prob').text(d.data.expected_probability);
+        $('#expectation-last-sibling-prob').text(1 - d.data.p_f);
+        $('#expectation-not-leaf-prob').text(1 - d.data.p_a);
+	$('#expectation-attr-actual').text(d.data.attr_actual);
+	$('#expectation-attr').text(d.data.attr_expected);
+	$('#expectation-attr-max-prob').text(d.data.attr_expected_probability);
+	$('#expectation-attr-target-prob').text(d.data.attr_target_probability);
+	$('#expectation-attr-ratio').text(d.data.attr_ratio);
 
         $('#expectation').css({top: d.y-100 , left: d.x - 100 }).show();
     });
@@ -223,7 +243,7 @@ $(document).ready(function() {
 	width = 1460 - margin.left - margin.right,
 	height = 1000 - margin.top - margin.bottom;
 
-    // append the svg obgect to the body of the page
+    // append the svg object
     // appends a 'group' element to 'svg'
     // moves the 'group' element to the top left margin
     svg = d3.select("#tree").append("svg")

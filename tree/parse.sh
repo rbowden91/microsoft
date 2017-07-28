@@ -1,5 +1,6 @@
 cd ../vigenere/correct15
-for i in *; do
+for i in 10*; do
+    echo $i
     cd $i
     path=`pwd`
     cd ../../../tree

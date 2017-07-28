@@ -46,11 +46,11 @@
       }
 
       #expectation {
-      	  position: absolute;
+      	  /*position: absolute;*/
       	  display: none;
       	  background-color: white;
 	  border: 1px solid black;
-	  height: 100px;
+	  /*height: 150px;*/
       }
 
       #submit-div {
@@ -61,18 +61,29 @@
     </style>
   </head>
   <body>
-    <div id="tree"></div><div style="clear:both"></div>
-    <div id="expectation">
-	Actual Token: <span id="expectation-actual"></span><br>
-	Expected Token: <span id="expectation-token"></span><br>
-	Actual Token Probability: <span id="expectation-target-prob"></span><br>
-	Expected Token Probability: <span id="expectation-max-prob"></span><br>
-	Ratio: <span id="expectation-ratio"></span></br>
-    </div>
     <div id='submit-div'>
 	<button id="submit">Submit!</button>
     </div>
     <div id="code" contenteditable="true"></div>
     <div id="heatmap"></div>
+    <div style="clear:both"></div>
+    <div id="tree">
+	<div id="expectation">
+	    Actual Token: <span id="expectation-actual"></span><br>
+	    Expected Token: <span id="expectation-token"></span><br>
+	    Actual Token Probability: <span id="expectation-target-prob"></span><br>
+	    Expected Token Probability: <span id="expectation-max-prob"></span><br>
+	    Ratio: <span id="expectation-ratio"></span></br>
+
+	    Actual Attr: <span id="expectation-attr-actual"></span><br>
+	    Expected Attr: <span id="expectation-attr"></span><br>
+	    Actual Attr Probability: <span id="expectation-attr-target-prob"></span><br>
+	    Expected Attr Probability: <span id="expectation-attr-max-prob"></span><br>
+	    Attr Ratio: <span id="expectation-attr-ratio"></span></br>
+
+	    Not Leaf Probability: <span id="expectation-not-leaf-prob"></span><br>
+	    Sibling Probability: <span id="expectation-last-sibling-prob"></span><br>
+	</div>
+    </div>
   </body>
 </html>

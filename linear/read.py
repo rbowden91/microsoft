@@ -177,6 +177,8 @@ def main(path):
         queues[i]['queue'].join()
 
     cutoff = config['num_files'] * config['train_fraction'] * config['unk_cutoff']
+
+    # XXX why aren't I just pulling from lexicon??
     tokens = set([token for lst in queues['train']['tokens'] for token in lst if lexicon[token] > cutoff])
 
     token_to_id = dict(zip(tokens, range(len(tokens))))
