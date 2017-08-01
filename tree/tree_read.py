@@ -51,20 +51,20 @@ def process_queue(queues, lexicon, lock):
             with open(os.path.join(file, 'tree_stripped.json')) as f:
                 data = json.load(f)
             new_row = dict()
-            for k in queues[key]:
-                # include 0 for the <nil> parent/siblings
-                new_row[k] = [0]
-            del(new_row['queue'])
 
             file_lexicon = set()
             for i in range(len(data)):
-                token = data[i]['name']
+                # transform label to label_index
+                token = data[i]['label']
                 if key == "train":
                     with lock:
                         if token not in lexicon['ast_labels']:
                             lexicon['ast_labels'][token] = len(lexicon['ast_labels'])
                 token = token if token in lexicon['ast_labels'] else '<unk_label>'
-                data[i]['token'] = lexicon['ast_labels'][token]
+                data[i]['label_index'] = lexicon['ast_labels'][token]
+                del(data[i]['label'])
+
+                # transform attrs to a (XXX single) attr index
                 for (name, val) in data[i]['attrs']:
                     if name in ['value', 'op', 'name']:
                         if key == "train":
@@ -80,13 +80,19 @@ def process_queue(queues, lexicon, lock):
                         break
                 else:
                     data[i]['attr'] = '<no_attr>'
+                del(data[i]['attrs'])
 
-                for k in new_row:
+                for k in data[i]:
+                    if k not in new_row:
+                        # include 0 for the <nil> dependencies
+                        new_row[k] = [0]
                     new_row[k].append(int(data[i][k]) if isinstance(data[i][k], bool) else data[i][k])
 
 
             with lock:
                 for k in new_row.keys():
+                    if k not in queues[key]:
+                        queues[key][k] = []
                     queues[key][k].append(new_row[k])
 
             queues[key]['queue'].task_done()
@@ -108,15 +114,8 @@ def main(path):
 
     queues = {}
     for i in ['train', 'test', 'valid']:
-        # XXX must match data
         queues[i] = {
             'queue': Queue(maxsize=0),
-            'token': [],
-            'sibling': [],
-            'parent': [],
-            'leaf_node': [],
-            'last_sibling': [],
-            'attr': []
         }
 
     for i in range(config['num_files']):
@@ -153,7 +152,11 @@ def main(path):
     lexicon['label_attrs']['<unk_attr>'] = len(lexicon['label_attrs'])
 
     for i in queues:
-        queues[i]['attr'] = tokens_to_ids(queues[i]['attr'], lexicon['label_attrs'], False)
+        queues[i]['attr_index'] = tokens_to_ids(queues[i]['attr'], lexicon['label_attrs'], False)
+        del(queues[i]['attr'])
+
+        # don't care
+        del(queues[i]['node_number'])
 
     # XXX make this a flag
     if not os.path.isdir(path):

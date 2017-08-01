@@ -2,16 +2,20 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import sys
 import inspect
 import time
 import json
 import os
 import tree_read
+import re
 
-from pycparser import c_parser, c_ast, parse_file
+from pycparser import c_parser, c_ast, parse_file, c_generator
 
 import numpy as np
 import tensorflow as tf
+import queue as Q
+import check_correct
 
 flags = tf.flags
 logging = tf.logging
@@ -28,9 +32,89 @@ flags.DEFINE_string("task_path", None,
 
 FLAGS = flags.FLAGS
 
+max_changes = 3
+generator = c_generator.CGenerator()
+
+ignore = ['Typedef', 'Decl', 'TypeDecl', 'DeclList']
+
+# side effect: populate node_properties with parent pointers (not yet used?)
+def fill_queue(node, node_properties, q, parent=None):
+    if node.__class__.__name__ in ignore:
+        return
+    node_properties[node]['parent'] = parent
+
+    score = node_properties[node]['attr_ratio']
+    # XXX for now, time.time() is supposed to make sure that we never get to comparing nodes
+    q.put((score, time.time(), node))
+    children = node.children()
+    for i in range(len(children)):
+        fill_queue(children[i][1], node_properties, q, node)
+
+# XXX heuristics about class name?
+def search_changes(ast, node_properties, list_q, max_changes, filename, directives, start = 0, num_changes = 0):
+    for i in range(start, len(list_q)):
+        node = list_q[i][2]
+        # adjust this cutoff?
+        if node_properties[node]['attr_ratio'] == 1.0:
+            break
+        # XXX for now, don't deal with IDs...what about functions though? ugh...
+        if node.__class__.__name__ in ignore or node.__class__.__name__ == 'ID':
+            continue
+        nvlist = [(n, getattr(node, n)) for n in node.attr_names]
+        for (name, val) in nvlist:
+            if name in ['value', 'op', 'name']:
+                setattr(node, name, node_properties[node]['attr_expected'])
+                if num_changes == max_changes - 1:
+                    #try:
+                        code = directives + generator.visit(ast)
+                        path = os.path.join(FLAGS.task_path, '.' + filename + '.c')
+                        with open(path, 'w') as f:
+                            f.write(code)
+                        ret = check_correct.check_vigenere(path)
+                        os.unlink(path)
+                        if ret == 0:
+                            return code
+                    #except Exception:
+                    #    #print('uh ohhh')
+                    #    pass
+                else:
+                    ret = search_changes(ast, node_properties, list_q, max_changes, filename, directives, start=i+1, num_changes=num_changes+1)
+                    # Success! The ast is now repaired
+                    if ret is not False:
+                        return ret
+                # no luck, revert to the old value
+                setattr(node, name, val)
+                break
+    # didn't find a working tree
+    return False
+
+
+
+def search(ast, node_properties, filename, directives):
+    # XXX check if code already works?
+    #code = generator.visit(ast)
+    #path = os.path.join(FLAGS.task_path, '.' + filename + '.c')
+    #with open(path, 'w') as f:
+    #    f.write(code)
+    #ret = check_correct.check_vigenere(path)
+    #os.unlink(path)
+    #if ret == 0:
+    #    return code
+    q = Q.PriorityQueue()
+    fill_queue(ast, node_properties, q)
+    list_q = []
+    while not q.empty():
+        list_q.append(q.get())
+    for i in range(max_changes):
+        code = search_changes(ast, node_properties, list_q, i+1, filename, directives)
+        if code is not False:
+            return code
+    return False
+
+
 def print_ast(ast, node_properties):
     # ignore dumb typedefs for now
-    if ast.__class__.__name__ == 'Typedef' or ast.__class__.__name__ == 'Decl' or ast.__class__.__name__ == 'TypeDecl' or ast.__class__.__name__ == 'DeclList':
+    if ast.__class__.__name__ in ignore:
         return False
 
     output = {
@@ -72,7 +156,7 @@ def run_epoch(session, graph, config, ast, raw_data):
     # extend objects
     node_properties = {}
     def visit_tree(node, last_sibling, sibling, parent):
-        if node.__class__.__name__ == 'Typedef' or node.__class__.__name__ == 'Decl' or node.__class__.__name__ == 'TypeDecl' or node.__class__.__name__ == 'DeclList':
+        if node.__class__.__name__ in ignore:
             return False
         children = node.children()
 
@@ -178,6 +262,32 @@ def run_epoch(session, graph, config, ast, raw_data):
     #print(output)
     #return output
 
+# https://stackoverflow.com/questions/2319019/using-regex-to-remove-comments-from-source-files
+def remove_comments(string):
+    pattern = r"(\".*?\"|\'.*?\')|(/\*.*?\*/|//[^\r\n]*$)"
+    # first group captures quoted strings (double or single)
+    # second group captures comments (//single-line or /* multi-line */)
+    regex = re.compile(pattern, re.MULTILINE|re.DOTALL)
+    def _replacer(match):
+        # if the 2nd group (capturing comments) is not None,
+        # it means we have captured a non-quoted (real) comment string.
+        if match.group(2) is not None:
+            return "" # so we will return empty to remove the comment
+        else: # otherwise, we will return the 1st group
+            return match.group(1) # captured quoted-string
+    return regex.sub(_replacer, string)
+
+def grab_directives(string):
+    # not perfect...
+    pattern = r"(^\s*#[^\r\n]*[\r\n])"
+    regex = re.compile(pattern, re.MULTILINE|re.DOTALL)
+
+    directives = ''.join(regex.findall(string))
+    def _replacer(match):
+        return ""
+    sub = regex.sub(_replacer, string)
+    return directives, sub
+
 
 def main(_):
     directory = os.path.dirname(os.path.realpath(__file__))
@@ -206,18 +316,29 @@ def main(_):
         with tf.Session() as session:
             saver.restore(session, os.path.join(FLAGS.save_path, 'tree_model'))
 
+            parser = c_parser.CParser()
             while True:
                 for filename in os.listdir(FLAGS.task_path):
                     if filename.startswith('.'):
                         continue
                     try:
-                        ast = parse_file(os.path.join(FLAGS.task_path, filename), use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
-                    except Exception:
+                        with open(os.path.join(FLAGS.task_path, filename)) as f:
+                            text = f.read()
+                        directives, preprocessed = grab_directives(remove_comments(text))
+                        # XXX XXX XXX TYPES ARE AWFUL
+                        ast = parser.parse('typedef char* string;\n' + preprocessed)
+                        #ast = parse_file(os.path.join(FLAGS.task_path, filename), use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
+                    except ValueError:
                         # TODO: return some kind of error about failure to parse
+                        #print(str(sys.exc_info()[0]))
                         continue
 
                     node_properties = run_epoch(session, graph, config, ast, raw_data)
-                    output = print_ast(ast, node_properties)
+                    code = search(ast, node_properties, filename, directives)
+                    output = {
+                        'ast': print_ast(ast, node_properties),
+                        'fixed_code': code
+                    }
 
                     with open(os.path.join(FLAGS.task_path, '.' + filename + '-results-tmp'), 'w') as f:
                         json.dump(output, f)

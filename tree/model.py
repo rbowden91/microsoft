@@ -28,6 +28,19 @@ flags.DEFINE_bool("use_fp16", False,
 
 FLAGS = flags.FLAGS
 
+possible_dependencies = {
+    'forward': [
+        'parent',
+        'left_sibling',
+        'left_prior'
+    ],
+    'reverse': [
+        'children',
+        'right_sibling',
+        'right_prior'
+    ]
+}
+
 SmallConfig = {
   "init_scale" : 0.1,
   "learning_rate" : 1.0,
@@ -40,6 +53,7 @@ SmallConfig = {
   "keep_prob" : 1.0,
   "lr_decay" : 0.5,
   "batch_size" : 40, # currently, this is just 1
+  "dependencies" : ['left_sibling', 'parent', 'left_prior']
 }
 
 MediumConfig = {
@@ -54,6 +68,7 @@ MediumConfig = {
   "keep_prob" : 0.5,
   "lr_decay" : 0.8,
   "batch_size" : 20,
+  "dependencies" : ['left_sibling', 'parent']
 }
 
 LargeConfig = {
@@ -68,6 +83,7 @@ LargeConfig = {
   "keep_prob" : 0.35,
   "lr_decay" : 1 / 1.15,
   "batch_size" : 20,
+  "dependencies" : ['left_sibling', 'parent']
 }
 
 TestConfig = {
@@ -82,6 +98,7 @@ TestConfig = {
   "keep_prob" : 1.0,
   "lr_decay" : 0.5,
   "batch_size" : 20,
+  "dependencies" : ['left_sibling', 'parent', 'left_prior']
 }
 
 def data_type():
@@ -93,12 +110,13 @@ class TRNNModel(object):
     size = config['hidden_size']
     vocab_size = config['vocab_size']
     attr_size = config['attr_vocab_size']
+    self.dependencies = config['dependencies']
 
     # declare a bunch of parameters that will be reused later
     with tf.variable_scope('Parameters', reuse=False):
         # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
-        U_f = tf.get_variable('U_f', [size, size], dtype=tf.float32)
-        U_a = tf.get_variable('U_a', [size, size], dtype=tf.float32)
+        for dependency in self.dependencies:
+            tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
         u_f = tf.get_variable('u_f', [size], dtype=tf.float32)
         u_a = tf.get_variable('u_a', [size], dtype=tf.float32)
         attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
@@ -107,7 +125,7 @@ class TRNNModel(object):
 
         softmax_w = tf.get_variable("softmax_w", [size, vocab_size], dtype=data_type())
         softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
-        v_a = tf.get_variable("v_a", [vocab_size], dtype=data_type())
+        #v_a = tf.get_variable("v_a", [vocab_size], dtype=data_type())
         v_f = tf.get_variable("v_f", [vocab_size], dtype=data_type())
 
     def lstm_cell():
@@ -120,41 +138,18 @@ class TRNNModel(object):
         return tf.contrib.rnn.DropoutWrapper(
             lstm_cell(), output_keep_prob=config['keep_prob'])
 
-    self.is_leaf_placeholder = tf.placeholder(
-        tf.int32, [None], name='is_leaf_placeholder')
-    self.last_sibling_placeholder = tf.placeholder(
-        tf.int32, [None], name='last_sibling_placeholder')
-    self.node_index_placeholder = tf.placeholder(
-        tf.int32, [None], name='node_index_placeholder')
-    self.attr_index_placeholder = tf.placeholder(
-        tf.int32, [None], name='attr_index_placeholder')
-
-    config['dependencies'] = dependencies = ['sibling', 'parent']
+    self.placeholders = { 'data': {}, 'inference': {} }
+    for k in config['placeholders']['data']:
+        self.placeholders['data'][k] = tf.placeholder(tf.int32, [None], name=k+'_placeholder')
 
     # XXX XXX XXX better way of doing this? Basically, when doing inference, we want to be able to have different nodes
     # for each dependency, but we only use the Initial States as a place to write, which all are
     # associated with node 0
 
-    self.is_inference = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
-    self.inference_placeholders = {}
+    self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
     for k in config['dependencies']:
-        self.inference_placeholders[k] = tf.placeholder(tf.int32, [], name='inference_' + k + '_placeholder')
+        self.placeholders['inference'][k] = tf.placeholder(tf.int32, [], name='inference_' + k + '_placeholder')
 
-    # save names of placeholders so we have a handle for them when we load the graph for inference
-    # TODO: change most of these is_training's to is_testing? As long as batch size is 1, doesn't matter
-    if is_training:
-        config['placeholders'] = {
-            'is_leaf': self.is_leaf_placeholder.name,
-            'last_sibling': self.last_sibling_placeholder.name,
-            'node_index': self.node_index_placeholder.name,
-            'attr_index': self.attr_index_placeholder.name,
-            'is_inference': self.is_inference.name
-        }
-        for k in config['dependencies']:
-            config['placeholders']['inference_' + k] = self.inference_placeholders[k].name
-
-
-    self.dependency_placeholders = dict()
     self.dependency_initial_states = dict()
     self.dependency_cells = dict()
 
@@ -162,8 +157,16 @@ class TRNNModel(object):
     # for the tf.while_loop). The first index in dependency_states is thus aligned with the dependency in the
     # dependencies array
     dependency_states = []
-    for i in range(len(dependencies)):
-        dependency = dependencies[i]
+    # Record the names of the LSTM states in config, so later when we want to do inference we can use them in
+    # the feed_dict
+    self.feed = {
+        'initial_states': {},
+        'states': {}
+    }
+    for i in range(len(self.dependencies)):
+        dependency = self.dependencies[i]
+        self.feed['initial_states'][dependency] = []
+        self.feed['states'][dependency] = []
 
         with tf.variable_scope("RNN", reuse=None):
             with tf.variable_scope(dependency, reuse=None):
@@ -172,9 +175,6 @@ class TRNNModel(object):
                 # XXX 1 is the batch_size
                 self.dependency_initial_states[dependency] = self.dependency_cells[dependency].zero_state(1, data_type())
 
-        self.dependency_placeholders[dependency] = tf.placeholder(tf.int32, [None], name=(dependency + '_placeholder'))
-        if is_training:
-            config['placeholders'][dependency] = self.dependency_placeholders[dependency].name
 
         # need to manually handle LSTM states. This is gross, and happens all over the place
         dependency_states.append([])
@@ -200,19 +200,10 @@ class TRNNModel(object):
             dependency_states[i][-1][1] = dependency_states[i][-1][1].write(0,
                                                         self.dependency_initial_states[dependency][j].h)
 
-            # Record the names of the LSTM states in config, so later when we want to do inference we can use them in
-            # the feed_dict
-            if is_training:
-                if 'initial_states' not in config:
-                    config['initial_states'] = dict()
-                    config['states'] = dict()
-                if dependency not in config['initial_states']:
-                    config['initial_states'][dependency] = []
-                    config['states'][dependency] = []
-                config['initial_states'][dependency].append({
-                    'c': self.dependency_initial_states[dependency][j].c.name,
-                    'h': self.dependency_initial_states[dependency][j].h.name
-                })
+            self.feed['initial_states'][dependency].append({
+                'c': self.dependency_initial_states[dependency][j].c.name,
+                'h': self.dependency_initial_states[dependency][j].h.name
+            })
 
     with tf.device("/cpu:0"):
       embedding = tf.get_variable(
@@ -224,29 +215,30 @@ class TRNNModel(object):
 
     # this returns true as long as the loop counter is less than the length of the example
     loop_cond = lambda loss, ctr, dependency_states, label_prob, attr_prob, lpa, lpf: \
-        tf.less(ctr, tf.squeeze(tf.shape(self.is_leaf_placeholder)))
+        tf.less(ctr, tf.squeeze(tf.shape(self.placeholders['data']['is_leaf'])))
 
     def loop_body(loss, ctr, dependency_states, label_prob, attr_prob, lpa, lpf):
-        is_leaf = tf.cast(tf.gather(self.is_leaf_placeholder, ctr, name="IsLeafGather"), tf.float32)
-        last_sibling = tf.cast(tf.gather(self.last_sibling_placeholder, ctr, name="LastSiblingGather"), tf.float32)
-        node_index = tf.gather(self.node_index_placeholder, ctr, name="NodeIndexGather")
-        attr_index = tf.gather(self.attr_index_placeholder, ctr, name="AttrIndexGather")
+        is_leaf = tf.cast(tf.gather(self.placeholders['data']['is_leaf'], ctr, name="IsLeafGather"), tf.float32)
+        last_sibling = tf.cast(tf.gather(self.placeholders['data']['last_sibling'], ctr, name="LastSiblingGather"), tf.float32)
+        node_index = tf.gather(self.placeholders['data']['label_index'], ctr, name="NodeIndexGather")
+        attr_index = tf.gather(self.placeholders['data']['attr_index'], ctr, name="AttrIndexGather")
 
         outputs = {}
 
         # Generate both the sibling and parent RNN states for the current node, based on the previous sibling and parent
-        for i in range(len(dependencies)):
-            dependency = dependencies[i]
-            dependency_node = tf.gather(self.dependency_placeholders[dependency], ctr, name=(dependency+"Gather"))
+        for i in range(len(self.dependencies)):
+            dependency = self.dependencies[i]
+            dependency_node = tf.gather(self.placeholders['data'][dependency], ctr, name=(dependency+"Gather"))
 
             # During inference, we want to use the directly-supplied label for the parent, since each node is passed in
             # one-by-one and we won't have access to the parent when the child is passed in. During training, we have
             # all nodes in the example at once, so can directly grab the parent's label
-            handle_inference = lambda: [self.inference_placeholders[dependency]]
-            handle_training = lambda: tf.gather(self.node_index_placeholder, dependency_node, name=(dependency+"TokenGather"))
+            handle_inference = lambda: [self.placeholders['inference'][dependency]]
+            handle_training = lambda: tf.gather(self.placeholders['data']['label_index'], dependency_node, name=(dependency+"TokenGather"))
 
-            dependency_token = tf.cond(self.is_inference, handle_inference, handle_training)
+            dependency_token = tf.cond(self.placeholders['is_inference'], handle_inference, handle_training)
             dependency_embedding = tf.expand_dims(tf.gather(embedding, dependency_token, name=(dependency+"EmbedGather")), 0)
+            dependency_token = tf.Print(dependency_token, [dependency_token])
 
             with tf.variable_scope("RNN", reuse=None):
                 with tf.variable_scope(dependency, reuse=None):
@@ -273,9 +265,10 @@ class TRNNModel(object):
                         dependency_states[i][j][1] = dependency_states[i][j][1].write(ctr, new_state[j].h)
 
         # grab all of the projection paramaters, now that we have the current node's LSTM state
+        U = {}
         with tf.variable_scope('Parameters', reuse=True):
-            U_f = tf.get_variable('U_f', [size, size], dtype=tf.float32)
-            U_a = tf.get_variable('U_a', [size, size], dtype=tf.float32)
+            for dependency in self.dependencies:
+                U[dependency] = tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
             u_f = tf.get_variable('u_f', [size], dtype=tf.float32)
             u_a = tf.get_variable('u_a', [size], dtype=tf.float32)
             attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
@@ -288,8 +281,9 @@ class TRNNModel(object):
             v_f = tf.get_variable("v_f", [vocab_size], dtype=data_type())
 
         # this is the vector that combines the sibling and parent hidden states to be directly used in prediction
-        # TODO: generalize this in terms of "dependencies"
-        h_pred = tf.matmul(outputs['sibling'], U_f) + tf.matmul(outputs['parent'], U_a)
+        h_pred = tf.zeros([1, size])
+        for dependency in self.dependencies:
+            h_pred += tf.matmul(outputs[dependency], U[dependency])
 
         # predict whether there is a child node (a = ancestor)
         logits_p_a = tf.reduce_sum(tf.multiply(u_a, h_pred))
@@ -348,23 +342,22 @@ class TRNNModel(object):
          0.0], # predicted_p_f
         parallel_iterations=1)
 
-    # save some more tensor names for us to use in inference
-    if is_training:
-        config['fetches'] = {
-            'predicted_p_a': predicted_p_a.name,
-            'predicted_p_f': predicted_p_f.name,
-            'label_probabilities': label_probabilities.name,
-            'attr_probabilities': attr_probabilities.name,
-            'states': {}
-        }
-        for i in range(len(dependencies)):
-            config['fetches']['states'][dependencies[i]] = []
-            for j in range(len(dependency_states[i])):
-                # for inference, we only care about the "root" node's state
-                config['fetches']['states'][dependencies[i]].append({
-                    'c': dependency_states[i][j][0].read(1).name,
-                    'h': dependency_states[i][j][1].read(1).name,
-                })
+    # tensors we might want to have access to during inference
+    self.fetches = {
+        'predicted_p_a': predicted_p_a.name,
+        'predicted_p_f': predicted_p_f.name,
+        'label_probabilities': label_probabilities.name,
+        'attr_probabilities': attr_probabilities.name,
+        'states': {}
+    }
+    for i in range(len(self.dependencies)):
+        self.fetches['states'][self.dependencies[i]] = []
+        for j in range(len(dependency_states[i])):
+            # for inference, we only care about the "root" node's state
+            self.fetches['states'][self.dependencies[i]].append({
+                'c': dependency_states[i][j][0].read(1).name,
+                'h': dependency_states[i][j][1].read(1).name,
+            })
 
     self._cost = cost = tf.reduce_sum(loss)
 
@@ -425,24 +418,19 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
     if eval_op is not None:
         fetches["eval_op"] = eval_op
 
-    epoch_size = len(data['leaf_node'])
+    epoch_size = len(data['is_leaf'])
 
     for step in range(epoch_size):
-        feed_dict = {
-            model.is_leaf_placeholder: data['leaf_node'][step],
-            model.last_sibling_placeholder: data['last_sibling'][step],
-            model.node_index_placeholder: data['token'][step],
-            model.attr_index_placeholder: data['attr'][step],
-            model.dependency_placeholders['sibling']: data['sibling'][step],
-            model.dependency_placeholders['parent']: data['parent'][step],
+        feed_dict = { model.placeholders['is_inference']: False }
 
-            model.is_inference: False,
+        # TODO: some of these placeholders might be unused, if the data isn't used. can filter out
+        for k in data:
+            feed_dict[model.placeholders['data'][k]] = data[k][step]
 
-            # these aren't used if is_inference is False, but it seems we still need
-            # to feed them in
-            model.inference_placeholders['parent']: 0,
-            model.inference_placeholders['sibling']: 0
-        }
+        # these aren't used if is_inference is False, but it seems we still need
+        # to feed them in evidently :-\
+        for k in model.dependencies:
+            feed_dict[model.placeholders['inference'][k]] = 0
 
         vals = session.run(fetches, feed_dict)
         cost = vals["cost"]
@@ -492,6 +480,14 @@ def main(_):
     config['vocab_size'] = len(raw_data['token_to_id'])
     config['attr_vocab_size'] = len(raw_data['attr_to_id'])
 
+    config['placeholders'] = {
+        'data': {},
+        'inference': {}
+    }
+    # this needs to be populated so model initialization can quickly create the appropriate placeholders
+    for k in raw_data['train']:
+        config['placeholders']['data'][k] = None
+
     eval_config = config.copy()
     #eval_config['batch_size'] = 1
     #eval_config['num_steps'] = 1
@@ -506,7 +502,7 @@ def main(_):
             tf.summary.scalar("Training Loss", m.cost)
             tf.summary.scalar("Learning Rate", m.lr)
 
-        # TODO: Can remove Valid and Test nodes from the saved model
+        # TODO: Can remove Valid and Training nodes from the saved model?
         with tf.name_scope("Valid"):
             with tf.variable_scope("TRNNModel", reuse=True, initializer=initializer):
                 mvalid = TRNNModel(is_training=False, config=config)
@@ -515,6 +511,15 @@ def main(_):
         with tf.name_scope("Test"):
             with tf.variable_scope("TRNNModel", reuse=True, initializer=initializer):
                 mtest = TRNNModel(is_training=False, config=eval_config)
+
+        # save stuff to be used later in inference
+        for k in mtest.placeholders['data']:
+            config['placeholders']['data'][k] = mtest.placeholders['data'][k].name
+        for k in mtest.placeholders['inference']:
+            config['placeholders']['inference'][k] = mtest.placeholders['inference'][k].name
+        config['placeholders']['is_inference'] = mtest.placeholders['is_inference'].name
+        config['fetches'] = mtest.fetches
+        config['feed'] = mtest.feed
 
         saver = tf.train.Saver()
 

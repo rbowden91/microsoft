@@ -18,7 +18,7 @@ http.listen(3000, function(){
   console.log('listening on *:3000');
 });
 
-var max_timeout = 10;
+var max_timeout = 1000;
 var timeout_interval = 0.01;
 var files = {};
 

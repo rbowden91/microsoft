@@ -48,7 +48,14 @@ function htmlEncode(value) {
     return $('<div/>').text(value).html();
 }
 
-function generate_heatmap(data) {
+function displayCode(data) {
+    if (data === false) {
+	$('#heatmap').html('Could not fix code!');
+    } else {
+	$('#heatmap').html(htmlEncode(data));
+    }
+    return;
+
     // XXX for now, very rough guidelines for spacing and indentation. doesn't handle single-line ifs, loops, etc., but
     // those might not exist from pycparser?
     var output = '';
@@ -66,21 +73,21 @@ function generate_heatmap(data) {
 	    newline = false;
 	}
 
-	if (i !== 0) {
-	    if (data[i][0] === "'")
-	    output += "<span style='background-color:#" + gradient(grad, data[i-1].ratio) + "' data-expected=" +
-		      (data[i-1].expected === "'" ? "\"'\"" : ("'" + data[i-1].expected + "'")) +
-		      " data-ratio='" + data[i-1].ratio + "'" +
-		      " data-max='" + data[i-1].expected_probability + "'" +
-		      " data-target='" + data[i-1].target_probability + "'" +
-		      " data-actual=" +
-		      (data[i-1].target === "'" ? "\"'\"" : ("'" + data[i-1].target + "'")) +
-		      ">";
-	}
+	//if (i !== 0) {
+	//    if (data[i][0] === "'")
+	//    output += "<span style='background-color:#" + gradient(grad, data[i-1].ratio) + "' data-expected=" +
+	//	      (data[i-1].expected === "'" ? "\"'\"" : ("'" + data[i-1].expected + "'")) +
+	//	      " data-ratio='" + data[i-1].ratio + "'" +
+	//	      " data-max='" + data[i-1].expected_probability + "'" +
+	//	      " data-target='" + data[i-1].target_probability + "'" +
+	//	      " data-actual=" +
+	//	      (data[i-1].target === "'" ? "\"'\"" : ("'" + data[i-1].target + "'")) +
+	//	      ">";
+	//}
     	output += htmlEncode(token);
-	if (i !== 0) {
-	    output += "</span>";
-	}
+	//if (i !== 0) {
+	//    output += "</span>";
+	//}
 
     	if (token === '{') {
     	    output += "\n";
@@ -99,17 +106,17 @@ function generate_heatmap(data) {
 
     $('#heatmap').html(output);
 
-    $('#heatmap span').hover(function(e) {
-	$('#expectation-actual').text($(this).data('actual'));
-	$('#expectation-token').text($(this).data('expected'));
-	$('#expectation-ratio').text($(this).data('ratio'));
-	$('#expectation-target-prob').text($(this).data('target'));
-	$('#expectation-max-prob').text($(this).data('max'));
+    //$('#heatmap span').hover(function(e) {
+    //    $('#expectation-actual').text($(this).data('actual'));
+    //    $('#expectation-token').text($(this).data('expected'));
+    //    $('#expectation-ratio').text($(this).data('ratio'));
+    //    $('#expectation-target-prob').text($(this).data('target'));
+    //    $('#expectation-max-prob').text($(this).data('max'));
 
-	$('#expectation').css({top: event.clientY - 100, left: event.clientX}).show();
-    }, function() {
-    	$('#expectation').hide();
-    })
+    //    $('#expectation').css({top: event.clientY - 100, left: event.clientX}).show();
+    //}, function() {
+    //	$('#expectation').hide();
+    //})
 }
 
 function drawTree(treeData) {
@@ -233,7 +240,8 @@ $(document).ready(function() {
 	    $('#heatmap').text('Something went wrong! Maybe your code doesn\'t parse correctly?');
 	} else {
 	    //generate_heatmap(response.results);
-	    drawTree(response.results);
+	    drawTree(response.results.ast);
+	    displayCode(response.results.fixed_code);
 	}
     });
 
