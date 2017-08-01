@@ -17,6 +17,8 @@ import tensorflow as tf
 import queue as Q
 import check_correct
 
+import dump_ast
+
 flags = tf.flags
 logging = tf.logging
 
@@ -35,11 +37,9 @@ FLAGS = flags.FLAGS
 max_changes = 3
 generator = c_generator.CGenerator()
 
-ignore = ['Typedef', 'Decl', 'TypeDecl', 'DeclList']
-
 # side effect: populate node_properties with parent pointers (not yet used?)
 def fill_queue(node, node_properties, q, parent=None):
-    if node.__class__.__name__ in ignore:
+    if node.__class__.__name__ in dump_ast.ignore:
         return
     node_properties[node]['parent'] = parent
 
@@ -58,7 +58,7 @@ def search_changes(ast, node_properties, list_q, max_changes, filename, directiv
         if node_properties[node]['attr_ratio'] == 1.0:
             break
         # XXX for now, don't deal with IDs...what about functions though? ugh...
-        if node.__class__.__name__ in ignore or node.__class__.__name__ == 'ID':
+        if node.__class__.__name__ in dump_ast.ignore or node.__class__.__name__ == 'ID':
             continue
         nvlist = [(n, getattr(node, n)) for n in node.attr_names]
         for (name, val) in nvlist:
@@ -114,7 +114,7 @@ def search(ast, node_properties, filename, directives):
 
 def print_ast(ast, node_properties):
     # ignore dumb typedefs for now
-    if ast.__class__.__name__ in ignore:
+    if ast.__class__.__name__ in dump_ast.ignore:
         return False
 
     output = {
@@ -137,115 +137,98 @@ def print_ast(ast, node_properties):
     return output
 
 
-def run_epoch(session, graph, config, ast, raw_data):
+def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states):
     fetches = {}
     for k in config['fetches']:
         fetches[k] = config['fetches'][k]
 
-    # TODO: do this once, instead of in each run_epoch
-    initial_states = {}
-    for k in config['initial_states']:
-        initial_states[k] = []
-        for i in range(len(config['initial_states'][k])):
-            c, h = session.run([config['initial_states'][k][i]['c'], config['initial_states'][k][i]['h']])
-            # don't really need to wrap this up in an LSTM tuple
-            initial_states[k].append(tf.contrib.rnn.LSTMStateTuple(c, h))
-
-
-    # Can't add attributes directly to Nodes because the class uses __slots__, so use this dictionary to
-    # extend objects
-    node_properties = {}
-    def visit_tree(node, last_sibling, sibling, parent):
-        if node.__class__.__name__ in ignore:
+    def visit_tree(node):
+        if node.__class__.__name__ in dump_ast.ignore:
             return False
-        children = node.children()
+        props = node_properties[node]
 
-        feed_dict = {
-            # the 0th index represents the empty sibling/parent, so the actual data for this node should
-            # go in the 1st
-            config['placeholders']['is_leaf']: [0, 1 if len(children) == 0 else 0],
-            config['placeholders']['last_sibling']: [0, 1 if last_sibling else 0],
-
-            # XXX should have an <unk>. This will fail if something unexpected is found
-            # need the parent token to feed it into the LSTM Cell
-            config['placeholders']['node_index']: [0, raw_data['token_to_id'][node.__class__.__name__]],
-
-            # 2nd 0 is a placeholder, changed below
-            config['placeholders']['attr_index']: [0, 0],
-
-            # these are specific to inference
-            config['placeholders']['is_inference']: True,
-            config['placeholders']['inference_parent']: raw_data['token_to_id'][parent.__class__.__name__] if parent is not None else 0,
-            config['placeholders']['inference_sibling']: raw_data['token_to_id'][sibling.__class__.__name__] if sibling is not None else 0,
-
-            # these should always be zero
-            config['placeholders']['parent']: [0, 0],
-            config['placeholders']['sibling']: [0, 0]
-        }
-
-        nvlist = [(n, getattr(node, n)) for n in node.attr_names]
-        for (name, val) in nvlist:
+        label_index = raw_data['token_to_id'][props['label']] \
+                        if props['label'] in raw_data['token_to_id'] \
+                        else raw_data['token_to_id']['<unk_label>']
+        for (name, val) in props['attrs']:
             if name in ['value', 'op', 'name']:
-                feed_dict[config['placeholders']['attr_index']][1] = tree_read.tokens_to_ids([[val]],
+                attr_index = tree_read.tokens_to_ids([[val]],
                         raw_data['attr_to_id'], False)[0][0]
                 break
         else:
-            feed_dict[config['placeholders']['attr_index']][1] = raw_data['attr_to_id']['<no_attr>']
+            attr_index = raw_data['attr_to_id']['<no_attr>']
 
+        props['label_index'] = label_index
+        props['attr_index'] = label_index
 
-        for i in range(len(config['initial_states']['sibling'])):
-            feed_dict[config['initial_states']['sibling'][i]['c']] = node_properties[sibling]['states']['sibling'][i]['c'] if sibling is not None else initial_states['sibling'][i].c
-            feed_dict[config['initial_states']['sibling'][i]['h']] = node_properties[sibling]['states']['sibling'][i]['h'] if sibling is not None else initial_states['sibling'][i].h
+        feed_dict = {
+            config['placeholders']['is_inference']: True,
+            config['placeholders']['data']['label_index']: [0, label_index],
+            config['placeholders']['data']['attr_index']: [0, attr_index]
+        }
 
-        for i in range(len(config['initial_states']['parent'])):
-            feed_dict[config['initial_states']['parent'][i]['c']] = node_properties[parent]['states']['parent'][i]['c'] if parent is not None else initial_states['parent'][i].c
-            feed_dict[config['initial_states']['parent'][i]['h']] = node_properties[parent]['states']['parent'][i]['h'] if parent is not None else initial_states['parent'][i].h
+        for k in config['placeholders']['data']:
+            if config['placeholders']['data'][k] in feed_dict:
+                continue
 
+            # the 0th index represents the empty sibling/parent, so the actual data for this node should
+            # go in the 1st
+            if k in config['placeholders']['inference']:
+                feed_dict[config['placeholders']['data'][k]] = [0, 0]
+                # should exist
+                dependency_node = props['dependencies'][k]
+                feed_dict[config['placeholders']['inference'][k]] = node_properties[dependency_node]['label_index'] if dependency_node in node_properties else 0
+            else:
+                feed_dict[config['placeholders']['data'][k]] = [0, props[k]]
+
+        for dependency in config['dependencies']:
+            for i in range(len(config['feed']['initial_states'][dependency])):
+                state = config['feed']['initial_states'][dependency][i]
+                dependency_node = props['dependencies'][dependency]
+                if dependency_node is not None:
+                    dependency_props = node_properties[dependency_node]
+                    feed_dict[state['c']] = dependency_props['states'][dependency][i]['c']
+                    feed_dict[state['h']] = dependency_props['states'][dependency][i]['h']
+                else:
+                    feed_dict[state['c']] = initial_states[dependency][i].c
+                    feed_dict[state['h']] = initial_states[dependency][i].h
 
         vals = session.run(fetches, feed_dict)
 
-        node_properties[node] = {}
         node_properties[node]['probabilities'] = probabilities = vals['label_probabilities'][0]
         #### XXX ROB: do this in tensorflow?
         expected_id = np.argmax(probabilities)
+        # XXX again, possibly <unk>
         node_properties[node]['expected'] = raw_data['id_to_token'][expected_id]
         node_properties[node]['expected_probability'] = probabilities[expected_id]
 
-        # XXX again, possibly <unk>
         #target_id = raw_data['token_to_id'][node.__class__.__name__]
-        target_id = feed_dict[config['placeholders']['node_index']][1]
+        target_id = feed_dict[config['placeholders']['data']['label_index']][1]
         node_properties[node]['target_probability'] = probabilities[target_id]
 
         node_properties[node]['ratio'] = probabilities[target_id] / probabilities[expected_id]
 
         node_properties[node]['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
         attr_expected_id = np.argmax(attr_probabilities)
+        # check <unk>
         node_properties[node]['attr_expected'] = raw_data['id_to_attr'][attr_expected_id]
         node_properties[node]['attr_expected_probability'] = attr_probabilities[attr_expected_id]
-        attr_target_id = feed_dict[config['placeholders']['attr_index']][1]
+        attr_target_id = feed_dict[config['placeholders']['data']['attr_index']][1]
         node_properties[node]['attr_actual'] = raw_data['id_to_attr'][attr_target_id]
         node_properties[node]['attr_target_probability'] = attr_probabilities[attr_target_id]
 
         node_properties[node]['attr_ratio'] = attr_probabilities[attr_target_id] / attr_probabilities[attr_expected_id]
 
-
-        # XXX these can be negative. how to make them probabilities?
         node_properties[node]['p_a'] = vals['predicted_p_a']
         node_properties[node]['p_f'] = vals['predicted_p_f']
         node_properties[node]['states'] = vals['states']
 
-        next_sibling = None
+        children = node.children()
         for i in range(len(children)):
-            result = visit_tree(children[i][1], i == len(children) - 1, next_sibling, node)
-            if result is True:
-                next_sibling = children[i][1]
+            visit_tree(children[i][1])
         return True
 
-    visit_tree(ast, True, None, None)
-    return node_properties
-
-
-
+    visit_tree(ast)
 
     #target_probability = probabilities[data[step+1][0]]
     #max_probability = probabilities[m]
@@ -316,6 +299,14 @@ def main(_):
         with tf.Session() as session:
             saver.restore(session, os.path.join(FLAGS.save_path, 'tree_model'))
 
+            initial_states = {}
+            for k in config['feed']['initial_states']:
+                initial_states[k] = []
+                for i in range(len(config['feed']['initial_states'][k])):
+                    c, h = session.run([config['feed']['initial_states'][k][i]['c'], config['feed']['initial_states'][k][i]['h']])
+                    # don't really need to wrap this up in an LSTM tuple
+                    initial_states[k].append(tf.contrib.rnn.LSTMStateTuple(c, h))
+
             parser = c_parser.CParser()
             while True:
                 for filename in os.listdir(FLAGS.task_path):
@@ -333,7 +324,11 @@ def main(_):
                         #print(str(sys.exc_info()[0]))
                         continue
 
-                    node_properties = run_epoch(session, graph, config, ast, raw_data)
+                    # Can't add attributes directly to Nodes because the class uses __slots__, so use this dictionary to
+                    # extend objects
+                    node_properties = {}
+                    ret = dump_ast.linearize_ast(ast, node_properties=node_properties) # XXX how slow is this?
+                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states)
                     code = search(ast, node_properties, filename, directives)
                     output = {
                         'ast': print_ast(ast, node_properties),

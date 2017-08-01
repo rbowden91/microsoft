@@ -24,6 +24,7 @@ config = {
     'num_files': 100#None
 }
 
+# XXX this should just be attrs_to_ids
 def tokens_to_ids(tokens, token_to_id, include_token):
     output = []
     for i in range(len(tokens)):
@@ -48,7 +49,9 @@ def process_queue(queues, lexicon, lock):
         while not queues[key]['queue'].empty():
             file = queues[key]['queue'].get()
             print(file)
+            # XXX XXX XXX XXX XXX
             with open(os.path.join(file, 'tree_stripped.json')) as f:
+            #with open(file) as f:
                 data = json.load(f)
             new_row = dict()
 
@@ -97,15 +100,13 @@ def process_queue(queues, lexicon, lock):
 
             queues[key]['queue'].task_done()
 
-def main(path):
-    data_dir = '../vigenere/correct15/'
-
+def main(input_path, path):
     # the rest is test data
 
     def eprint(*args, **kwargs):
         print(*args, file=sys.stderr, **kwargs)
 
-    files = [data_dir + filename for filename in os.listdir(data_dir) if not filename.startswith('.')]
+    files = [os.path.join(input_path, filename) for filename in os.listdir(input_path) if not filename.startswith('.')]
 
     if config['num_files'] is None:
         config['num_files'] = len(files)
@@ -174,7 +175,8 @@ def main(path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tokenizer')
-    parser.add_argument('path', help='data directory to store things')
+    parser.add_argument('input_path', help='data directory to read files from')
+    parser.add_argument('data_path', help='data directory to store things')
 
     args = parser.parse_args()
-    main(args.path)
+    main(args.input_path, args.data_path)

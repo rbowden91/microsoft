@@ -13,13 +13,15 @@ import json
 
 from pycparser import c_parser, c_ast, parse_file
 
-def print_ast(ast, ret=[], parent=0, sibling=0, prior=0, last_sibling=True):
-    if ast.__class__.__name__ == 'Typedef' or ast.__class__.__name__ == 'Decl' or ast.__class__.__name__ == 'TypeDecl' or ast.__class__.__name__ == 'DeclList':
+ignore = ['Typedef', 'Decl', 'TypeDecl', 'DeclList']
+
+def linearize_ast(ast, ret=[], parent=0, sibling=0, prior=0, last_sibling=True, node_properties=None):
+    if ast.__class__.__name__ in ignore:
         return False
 
     nvlist = [(n, getattr(ast,n)) for n in ast.attr_names]
 
-    my_node_num = len(ret)
+    my_node_num = len(ret) + 1
 
     children = ast.children()
     node = {
@@ -40,11 +42,26 @@ def print_ast(ast, ret=[], parent=0, sibling=0, prior=0, last_sibling=True):
     }
     ret.append(node)
 
+    if node_properties is not None:
+        node_properties[ast] = node
+        node['self'] = ast
+        node['dependencies'] = {
+            'parent': ret[parent-1]['self'] if parent is not 0 else None,
+            'left_sibling': ret[sibling-1]['self'] if sibling is not 0 else None,
+            'right_sibling': None,
+            'left_prior': ret[prior-1]['self'] if prior is not 0 else None,
+            'right_prior': None
+        }
+
     if sibling != 0:
         ret[sibling]['right_sibling'] = my_node_num
+        if node_properties is not None:
+            ret[sibling]['dependencies']['right_sibling'] = ast
 
     if prior != 0:
         ret[prior]['right_prior'] = my_node_num
+        if node_properties is not None:
+            ret[prior]['dependencies']['right_prior'] = ast
 
     new_number = my_node_num+1
     sibling = 0
@@ -55,19 +72,21 @@ def print_ast(ast, ret=[], parent=0, sibling=0, prior=0, last_sibling=True):
     # actual children
     for i in range(len(children)):
         (child_name, child) = children[i]
-        child_result = print_ast(
+        child_result = linearize_ast(
             child,
             ret=ret,
             parent=my_node_num,
             sibling=sibling,
             prior=prior,
-            last_sibling = i == len(children) - 1)
+            last_sibling = i == len(children) - 1,
+            node_properties=node_properties)
         if child_result is False:
             continue
         sibling = new_number
         new_number = ret[-1]['node_number'] + 1
         # XXX theoretically, sibling and prior could be equal.
         prior = ret[-1]['node_number']
+
     return ret
 
 if __name__ == "__main__":
@@ -76,5 +95,5 @@ if __name__ == "__main__":
     args = argparser.parse_args()
 
     ast = parse_file(args.filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
-    print(json.dumps(print_ast(ast)))
+    print(json.dumps(linearize_ast(ast)))
 
