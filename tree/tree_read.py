@@ -21,7 +21,7 @@ config = {
     # could also be changed to number of files it appears in
     'unk_cutoff': 0.01,
     # if None, will be auto-filled with total number of files
-    'num_files': 100#None
+    'num_files': 1000#None
 }
 
 # XXX this should just be attrs_to_ids

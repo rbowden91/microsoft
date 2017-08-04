@@ -137,7 +137,7 @@ def print_ast(ast, node_properties):
     return output
 
 
-def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states):
+def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states, initial_output):
     fetches = {}
     for k in config['fetches']:
         fetches[k] = config['fetches'][k]
@@ -145,6 +145,11 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
     def visit_tree(node):
         if node.__class__.__name__ in dump_ast.ignore:
             return False
+
+        children = node.children()
+        for i in range(len(children) - 1, -1, -1):
+            visit_tree(children[i][1])
+
         props = node_properties[node]
 
         label_index = raw_data['token_to_id'][props['label']] \
@@ -158,74 +163,120 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
         else:
             attr_index = raw_data['attr_to_id']['<no_attr>']
 
+        # remember the index for the future
         props['label_index'] = label_index
         props['attr_index'] = label_index
 
         feed_dict = {
             config['placeholders']['is_inference']: True,
             config['placeholders']['data']['label_index']: [0, label_index],
-            config['placeholders']['data']['attr_index']: [0, attr_index]
+            config['placeholders']['data']['attr_index']: [0, attr_index],
+            config['placeholders']['data']['num_children']: [0, 0]
         }
 
         for k in config['placeholders']['data']:
+            # already filled them in above
             if config['placeholders']['data'][k] in feed_dict:
                 continue
 
             # the 0th index represents the empty sibling/parent, so the actual data for this node should
             # go in the 1st
+            # this fills in all inference values *except* for children
             if k in config['placeholders']['inference']:
+                if k == 'children': continue
                 feed_dict[config['placeholders']['data'][k]] = [0, 0]
                 # should exist
                 dependency_node = props['dependencies'][k]
+                # XXX XXX XXX XXX XXX
+                if k in ['left_sibling', 'parent', 'left_prior']: continue
                 feed_dict[config['placeholders']['inference'][k]] = node_properties[dependency_node]['label_index'] if dependency_node in node_properties else 0
             else:
                 feed_dict[config['placeholders']['data'][k]] = [0, props[k]]
 
-        for dependency in config['dependencies']:
-            for i in range(len(config['feed']['initial_states'][dependency])):
-                state = config['feed']['initial_states'][dependency][i]
-                dependency_node = props['dependencies'][dependency]
-                if dependency_node is not None:
-                    dependency_props = node_properties[dependency_node]
-                    feed_dict[state['c']] = dependency_props['states'][dependency][i]['c']
-                    feed_dict[state['h']] = dependency_props['states'][dependency][i]['h']
-                else:
-                    feed_dict[state['c']] = initial_states[dependency][i].c
-                    feed_dict[state['h']] = initial_states[dependency][i].h
+        feed_dict[config['placeholders']['inference']['children']] = label_index
 
+        for dependency in config['dependencies']:
+            print(dependency)
+            for i in range(len(config['feed']['initial_states'][dependency])):
+                print(i)
+                state = config['feed']['initial_states'][dependency][i]
+                if dependency == 'children':
+                    if props['num_children'] != 0:
+                        state_c = 0
+                        state_h = 0
+                        children = node.children()
+                        for j in range(len(children)):
+                            if children[j][1] not in node_properties:
+                                continue
+                            child_props = node_properties[children[j][1]]
+                            state_c += child_props['states'][dependency][i]['c']
+                            state_h += child_props['states'][dependency][i]['h']
+
+                        feed_dict[state['c']] = state_c / props['num_children']
+                        feed_dict[state['h']] = state_h / props['num_children']
+                    else:
+                        feed_dict[state['c']] = initial_states[dependency][i].c
+                        feed_dict[state['h']] = initial_states[dependency][i].h
+                else:
+                    dependency_node = props['dependencies'][dependency]
+                    print("\n\n**\n\n")
+                    print(dependency, dependency_node)
+                    if dependency_node is not None:
+                        dependency_props = node_properties[dependency_node]
+                        feed_dict[state['c']] = dependency_props['states'][dependency][i]['c']
+                        feed_dict[state['h']] = dependency_props['states'][dependency][i]['h']
+                    else:
+                        print(initial_states[dependency])
+                        feed_dict[state['c']] = initial_states[dependency][i].c
+                        feed_dict[state['h']] = initial_states[dependency][i].h
+            if dependency == 'children':
+                if props['num_children'] == 0:
+                    feed_dict[config['feed']['initial_output']] = initial_output
+                else:
+                    output = 0
+                    for i in range(len(children)):
+                        if children[i][1] not in node_properties:
+                            continue
+                        output += node_properties[children[i][1]]['children_output']
+                    feed_dict[config['feed']['initial_output']] = output / props['num_children']
+
+        print("\n\n")
+        print(feed_dict, props['node_number'])
+        print("\n\n")
         vals = session.run(fetches, feed_dict)
 
-        node_properties[node]['probabilities'] = probabilities = vals['label_probabilities'][0]
+        props['probabilities'] = probabilities = vals['label_probabilities'][0]
         #### XXX ROB: do this in tensorflow?
         expected_id = np.argmax(probabilities)
-        # XXX again, possibly <unk>
-        node_properties[node]['expected'] = raw_data['id_to_token'][expected_id]
-        node_properties[node]['expected_probability'] = probabilities[expected_id]
+        props['expected'] = raw_data['id_to_token'][expected_id]
+        props['expected_probability'] = probabilities[expected_id]
 
         #target_id = raw_data['token_to_id'][node.__class__.__name__]
         target_id = feed_dict[config['placeholders']['data']['label_index']][1]
-        node_properties[node]['target_probability'] = probabilities[target_id]
+        props['target_probability'] = probabilities[target_id]
 
-        node_properties[node]['ratio'] = probabilities[target_id] / probabilities[expected_id]
+        props['ratio'] = probabilities[target_id] / probabilities[expected_id]
 
-        node_properties[node]['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
+        props['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
         attr_expected_id = np.argmax(attr_probabilities)
         # check <unk>
-        node_properties[node]['attr_expected'] = raw_data['id_to_attr'][attr_expected_id]
-        node_properties[node]['attr_expected_probability'] = attr_probabilities[attr_expected_id]
+        props['attr_expected'] = props['node_number']#raw_data['id_to_attr'][attr_expected_id]
+        props['attr_expected_probability'] = attr_probabilities[attr_expected_id]
         attr_target_id = feed_dict[config['placeholders']['data']['attr_index']][1]
-        node_properties[node]['attr_actual'] = raw_data['id_to_attr'][attr_target_id]
-        node_properties[node]['attr_target_probability'] = attr_probabilities[attr_target_id]
+        props['attr_actual'] = raw_data['id_to_attr'][attr_target_id]
+        props['attr_target_probability'] = attr_probabilities[attr_target_id]
 
-        node_properties[node]['attr_ratio'] = attr_probabilities[attr_target_id] / attr_probabilities[attr_expected_id]
+        props['attr_ratio'] = attr_probabilities[attr_target_id] / attr_probabilities[attr_expected_id]
 
-        node_properties[node]['p_a'] = vals['predicted_p_a']
-        node_properties[node]['p_f'] = vals['predicted_p_f']
-        node_properties[node]['states'] = vals['states']
+        props['p_a'] = feed_dict[config['placeholders']['data']['last_sibling']][1]
+        props['p_f'] = vals['predicted_p_first']#vals['predicted_p_f']
+        props['states'] = vals['states']
+        if 'children' in config['dependencies']:
+            props['children_output'] = vals['children_output']
 
-        children = node.children()
-        for i in range(len(children)):
-            visit_tree(children[i][1])
+        #children = node.children()
+        #for i in range(len(children)):
+        #    visit_tree(children[i][1])
         return True
 
     visit_tree(ast)
@@ -299,6 +350,8 @@ def main(_):
         with tf.Session() as session:
             saver.restore(session, os.path.join(FLAGS.save_path, 'tree_model'))
 
+            initial_output = session.run([config['feed']['initial_output']])[0] if 'children' in config['dependencies'] else 0
+
             initial_states = {}
             for k in config['feed']['initial_states']:
                 initial_states[k] = []
@@ -328,8 +381,8 @@ def main(_):
                     # extend objects
                     node_properties = {}
                     ret = dump_ast.linearize_ast(ast, node_properties=node_properties) # XXX how slow is this?
-                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states)
-                    code = search(ast, node_properties, filename, directives)
+                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states, initial_output)
+                    code = "blah"#search(ast, node_properties, filename, directives)
                     output = {
                         'ast': print_ast(ast, node_properties),
                         'fixed_code': code

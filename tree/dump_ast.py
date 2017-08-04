@@ -15,7 +15,7 @@ from pycparser import c_parser, c_ast, parse_file
 
 ignore = ['Typedef', 'Decl', 'TypeDecl', 'DeclList']
 
-def linearize_ast(ast, ret=[], parent=0, sibling=0, prior=0, last_sibling=True, node_properties=None):
+def linearize_ast(ast, ret=[], parent=0, sibling=0, prior=0, first_sibling=True, last_sibling=True, node_properties=None):
     if ast.__class__.__name__ in ignore:
         return False
 
@@ -35,9 +35,10 @@ def linearize_ast(ast, ret=[], parent=0, sibling=0, prior=0, last_sibling=True, 
         'left_prior': prior,
         'right_prior': 0, # same as with righ sibling
 
+        'first_sibling': first_sibling,
         'last_sibling': last_sibling,
-        'is_leaf': len(children) == 0,
-        'num_children': len(children),
+        'is_leaf': True,
+        'num_children': 0,
         'attrs': nvlist,
     }
     ret.append(node)
@@ -54,38 +55,50 @@ def linearize_ast(ast, ret=[], parent=0, sibling=0, prior=0, last_sibling=True, 
         }
 
     if sibling != 0:
-        ret[sibling]['right_sibling'] = my_node_num
+        # need to subtract 1, because nodes are 1-indexed instead of 0-indexed
+        ret[sibling-1]['right_sibling'] = my_node_num
         if node_properties is not None:
-            ret[sibling]['dependencies']['right_sibling'] = ast
+            ret[sibling-1]['dependencies']['right_sibling'] = ast
 
     if prior != 0:
-        ret[prior]['right_prior'] = my_node_num
+        ret[prior-1]['right_prior'] = my_node_num
         if node_properties is not None:
-            ret[prior]['dependencies']['right_prior'] = ast
+            ret[prior-1]['dependencies']['right_prior'] = ast
 
     new_number = my_node_num+1
     sibling = 0
     # XXX compare this against "= 0", which wouldn't cause parent and prior to be equal
     # until then, this is always just current_node_num-1
     prior = my_node_num
+    first_sibling = True
+    num_children = 0
+    last_child = None
 
     # actual children
     for i in range(len(children)):
         (child_name, child) = children[i]
+        last_child = len(ret)
         child_result = linearize_ast(
             child,
             ret=ret,
             parent=my_node_num,
             sibling=sibling,
             prior=prior,
-            last_sibling = i == len(children) - 1,
+            first_sibling=first_sibling,
+            last_sibling = False,
             node_properties=node_properties)
         if child_result is False:
             continue
+        first_sibling = False
+        num_children += 1
         sibling = new_number
         new_number = ret[-1]['node_number'] + 1
         # XXX theoretically, sibling and prior could be equal.
         prior = ret[-1]['node_number']
+    if num_children > 0:
+        ret[last_child]['last_sibling'] = True
+        node['is_leaf'] = False;
+        node['num_children'] = num_children
 
     return ret
 
