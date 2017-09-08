@@ -61,7 +61,7 @@ def check_vigenere(path):
     out = subprocess.run('clang ' + args.path + ' cs50.o -lm', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if out.returncode != 0:
-        return False
+        return -1
 
     failed = 0
     for i in range(len(tests)):

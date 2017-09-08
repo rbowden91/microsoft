@@ -43,4 +43,6 @@ typedef int va_list;
 #define va_arg(_ap, _type) __builtin_va_arg((_ap))
 #define va_end(_list)
 
+#define eprintf(format, ...) eprintf(__FILE__, __LINE__, format, ##__VA_ARGS__)
+
 #endif

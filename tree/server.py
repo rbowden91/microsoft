@@ -146,9 +146,9 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
         if node.__class__.__name__ in dump_ast.ignore:
             return False
 
-        children = node.children()
-        for i in range(len(children) - 1, -1, -1):
-            visit_tree(children[i][1])
+        #children = node.children()
+        #for i in range(len(children) - 1, -1, -1):
+        #    visit_tree(children[i][1])
 
         props = node_properties[node]
 
@@ -188,7 +188,7 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
                 # should exist
                 dependency_node = props['dependencies'][k]
                 # XXX XXX XXX XXX XXX
-                if k in ['left_sibling', 'parent', 'left_prior']: continue
+                if k not in ['left_sibling', 'parent', 'left_prior']: continue
                 feed_dict[config['placeholders']['inference'][k]] = node_properties[dependency_node]['label_index'] if dependency_node in node_properties else 0
             else:
                 feed_dict[config['placeholders']['data'][k]] = [0, props[k]]
@@ -196,9 +196,9 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
         feed_dict[config['placeholders']['inference']['children']] = label_index
 
         for dependency in config['dependencies']:
-            print(dependency)
+            #print(dependency)
             for i in range(len(config['feed']['initial_states'][dependency])):
-                print(i)
+                #print(i)
                 state = config['feed']['initial_states'][dependency][i]
                 if dependency == 'children':
                     if props['num_children'] != 0:
@@ -219,14 +219,14 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
                         feed_dict[state['h']] = initial_states[dependency][i].h
                 else:
                     dependency_node = props['dependencies'][dependency]
-                    print("\n\n**\n\n")
-                    print(dependency, dependency_node)
+                    #print("\n\n**\n\n")
+                    #print(dependency, dependency_node)
                     if dependency_node is not None:
                         dependency_props = node_properties[dependency_node]
                         feed_dict[state['c']] = dependency_props['states'][dependency][i]['c']
                         feed_dict[state['h']] = dependency_props['states'][dependency][i]['h']
                     else:
-                        print(initial_states[dependency])
+                        #print(initial_states[dependency])
                         feed_dict[state['c']] = initial_states[dependency][i].c
                         feed_dict[state['h']] = initial_states[dependency][i].h
             if dependency == 'children':
@@ -240,9 +240,9 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
                         output += node_properties[children[i][1]]['children_output']
                     feed_dict[config['feed']['initial_output']] = output / props['num_children']
 
-        print("\n\n")
-        print(feed_dict, props['node_number'])
-        print("\n\n")
+        #print("\n\n")
+        #print(feed_dict, props['node_number'])
+        #print("\n\n")
         vals = session.run(fetches, feed_dict)
 
         props['probabilities'] = probabilities = vals['label_probabilities'][0]
@@ -274,9 +274,9 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
         if 'children' in config['dependencies']:
             props['children_output'] = vals['children_output']
 
-        #children = node.children()
-        #for i in range(len(children)):
-        #    visit_tree(children[i][1])
+        children = node.children()
+        for i in range(len(children)):
+            visit_tree(children[i][1])
         return True
 
     visit_tree(ast)

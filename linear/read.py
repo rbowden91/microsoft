@@ -93,7 +93,7 @@ def read(filename, token_to_id=None, include_token=False, rename_ids=False, trun
         return tokens
 
 def tokens_to_ids(tokens, token_to_id, include_token):
-    print(tokens)
+    #print(tokens)
     output = []
     for i in range(len(tokens)):
         output.append([])
@@ -108,7 +108,7 @@ def tokens_to_ids(tokens, token_to_id, include_token):
         else:
             id = token_to_id['<unk>']
         output[i].append((id, token) if include_token else id)
-    print(output)
+    #print(output)
     return output
 
 
