@@ -260,7 +260,7 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
         props['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
         attr_expected_id = np.argmax(attr_probabilities)
         # check <unk>
-        props['attr_expected'] = props['node_number']#raw_data['id_to_attr'][attr_expected_id]
+        props['attr_expected'] = raw_data['id_to_attr'][attr_expected_id]
         props['attr_expected_probability'] = attr_probabilities[attr_expected_id]
         attr_target_id = feed_dict[config['placeholders']['data']['attr_index']][1]
         props['attr_actual'] = raw_data['id_to_attr'][attr_target_id]

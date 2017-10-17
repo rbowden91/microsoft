@@ -50,7 +50,8 @@ SmallConfig = {
   "lr_decay" : 0.5,
   "batch_size" : 40, # currently, this is just 1
   #"dependencies" : ['children']
-  "dependencies" : ['children', 'right_sibling', 'parent', 'left_sibling']
+  #"dependencies" : ['children', 'right_sibling', 'parent', 'left_sibling']
+  "dependencies" : ['parent', 'left_sibling', 'left_prior']
 }
 
 MediumConfig = {
@@ -463,7 +464,7 @@ class TRNNModel(object):
                 loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
                     self.calculate_loss(direction, loss, outputs, label_index, attr_index, first_sibling, last_sibling)
             ctr = tf.add(ctr, 1) if direction == 'forward' else tf.subtract(ctr, 1)
-            ctr = tf.Print(ctr, [ctr])
+            #ctr = tf.Print(ctr, [ctr])
 
             return loss, ctr, dependency_states, children_tmp_states, children_output, children_tmp_output, \
                    label_probabilities, attr_probabilities, predicted_p_first
