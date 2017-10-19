@@ -51,8 +51,8 @@ SmallConfig = {
   "batch_size" : 40, # currently, this is just 1
   #"dependencies" : ['children']
   #"dependencies" : ['children', 'right_sibling', 'parent', 'left_sibling']
-  #"dependencies" : ['parent', 'left_sibling', 'left_prior']
-  "dependencies" : ['children', 'right_sibling', 'right_prior']
+  "dependencies" : ['parent', 'left_sibling', 'left_prior']
+  #"dependencies" : ['children', 'right_sibling', 'right_prior']
 }
 
 MediumConfig = {
@@ -98,7 +98,8 @@ TestConfig = {
   "lr_decay" : 0.5,
   "batch_size" : 20,
   #"dependencies" : ['children']
-  "dependencies" : ['children', 'right_sibling', 'right_prior']
+  #"dependencies" : ['children', 'right_sibling', 'right_prior']
+  "dependencies" : ['left_sibling', 'parent', 'left_prior']
 }
 
 
@@ -220,7 +221,7 @@ class TRNNModel(object):
 
   def __init__(self, is_training, config):
     self.size = size = config['hidden_size']
-    self.vocab_size = vocab_size = config['vocab_size']
+    self.label_size = label_size = config['label_vocab_size']
     self.attr_size = attr_size = config['attr_vocab_size']
     self.dependencies = config['dependencies']
 
@@ -232,19 +233,18 @@ class TRNNModel(object):
         u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
         u_last = tf.get_variable('u_last', [size], dtype=tf.float32)
         u_a = tf.get_variable('u_a', [size], dtype=tf.float32)
-        attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
-        attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
-        v_attr = tf.get_variable("v_attr", [vocab_size, attr_size], dtype=data_type())
 
-        softmax_w = tf.get_variable("softmax_w", [size, vocab_size], dtype=data_type())
-        softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
-        #v_a = tf.get_variable("v_a", [vocab_size], dtype=data_type())
-        v_first = tf.get_variable("v_first", [vocab_size], dtype=data_type())
-        v_last = tf.get_variable("v_last", [vocab_size], dtype=data_type())
+        softmax_w = tf.get_variable("softmax_w", [size, label_size + attr_size], dtype=data_type())
+        softmax_b = tf.get_variable("softmax_b", [label_size + attr_size], dtype=data_type())
+
+        v_first = tf.get_variable("v_first", [label_size + attr_size], dtype=data_type())
+        v_last = tf.get_variable("v_last", [label_size + attr_size], dtype=data_type())
 
     with tf.device("/cpu:0"):
-      embedding = tf.get_variable(
-          "embedding", [vocab_size, size], dtype=data_type())
+      label_embedding = tf.get_variable(
+          "label_embedding", [label_size, size], dtype=data_type())
+      attr_embedding = tf.get_variable(
+          "attr_embedding", [attr_size, size], dtype=data_type())
 
     def lstm_cell(dependency, i):
         if dependency == 'children' and i == 0:
@@ -269,7 +269,10 @@ class TRNNModel(object):
 
     self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
     for k in possible_dependencies:
-        self.placeholders['inference'][k] = tf.placeholder(tf.int32, [], name='inference_' + k + '_placeholder')
+        self.placeholders['inference'][k] = {
+            'attr' : tf.placeholder(tf.int32, [], name='inference_' + k + '_attr_placeholder'),
+            'label' : tf.placeholder(tf.int32, [], name='inference_' + k + '_label_placeholder')
+        }
 
     self.dependency_initial_states = dict()
     self.dependency_cells = dict()
@@ -349,7 +352,7 @@ class TRNNModel(object):
     # this returns true as long as the loop counter is less than the length of the example
     def loop_cond_wrapper(direction):
         def loop_cond (loss, ctr, dependency_states, children_tmp_states, children_output, children_tmp_output,
-                label_probabailities, attr_probabilities, lpf):
+                label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
             if direction == 'forward':
                 return tf.less(ctr, tf.squeeze(tf.shape(self.placeholders['data']['is_leaf'])))
             else:
@@ -361,7 +364,7 @@ class TRNNModel(object):
 
     def loop_body_wrapper(direction):
         def loop_body(loss, ctr, dependency_states, children_tmp_states, children_output, children_tmp_output,
-                      label_probabilities, attr_probabilities, predicted_p_first):
+                      label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
             # TODO: can get rid of last_sibling and first_sibling by just using left/right-sibling != 0
             # XXX correction, no we can't! for inference, those are set to zero, but we still want, e.g., is_leaf
             # to be accurate
@@ -376,10 +379,11 @@ class TRNNModel(object):
             num_children = tf.cast(tf.gather(self.placeholders['data']['num_children'], ctr,
                                              name="AttrIndexGather"), tf.float32)
             # XXX XXX this needs to be fixed for inference :-X
-            parent_label_index = tf.gather(self.placeholders['data']['label_index'], parent,
-                                            name="ParentNodeIndexGather")
-            parent_embedding = tf.expand_dims(tf.gather(embedding, parent_label_index,
-                                                name=("ParentEmbedGather")), 0)
+            #parent_label_index = tf.gather(self.placeholders['data']['label_index'], parent,
+            #                                name="ParentNodeIndexGather")
+            ## XXX XXX parent_attr_index = 
+            #parent_embedding = tf.expand_dims(tf.gather(embedding, parent_label_index,
+            #                                    name=("ParentEmbedGather")), 0)
 
 
             # Generate both the sibling and parent RNN states for the current node, based on the previous sibling and parent
@@ -392,13 +396,21 @@ class TRNNModel(object):
                 # all nodes in the example at once, so can directly grab the parent's label
                 dependency_node = tf.gather(self.placeholders['data'][dependency], ctr, name=(dependency+"Gather")) if dependency != 'children' else ctr
 
-                handle_inference = lambda: [self.placeholders['inference'][dependency]]
-                handle_training = lambda: tf.gather(self.placeholders['data']['label_index'], dependency_node,
-                                                    name=(dependency+"TokenGather"))
+                handle_inference = lambda: (self.placeholders['inference'][dependency]['label'], \
+                                            self.placeholders['inference'][dependency]['attr'])
+                handle_training = lambda: (tf.gather(self.placeholders['data']['label_index'], dependency_node,
+                                                    name=(dependency+"TokenGatherLabel")), \
+                                          tf.gather(self.placeholders['data']['attr_index'], dependency_node,
+                                                    name=(dependency+"TokenGatherAttr")))
 
-                dependency_token = tf.cond(self.placeholders['is_inference'], handle_inference, handle_training)
-                dependency_embedding = tf.expand_dims(tf.gather(embedding, dependency_token,
+                dependency_label_token, dependency_attr_token = tf.cond(self.placeholders['is_inference'], handle_inference, handle_training)
+
+                dependency_label_embedding = tf.expand_dims(tf.gather(label_embedding, dependency_label_token,
                                                                 name=(dependency+"EmbedGather")), 0)
+                dependency_attr_embedding = tf.expand_dims(tf.gather(attr_embedding, dependency_attr_token,
+                                                                name=(dependency+"EmbedGather")), 0)
+                dependency_embedding = dependency_label_embedding + dependency_attr_embedding
+
                 with tf.variable_scope("RNN", reuse=None):
                     with tf.variable_scope(dependency, reuse=None):
                         if dependency != 'children':
@@ -464,12 +476,12 @@ class TRNNModel(object):
             # only calculate loss after we handle both directions
             if len(outputs.keys()) == len(self.dependencies):
                 loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
-                    self.calculate_loss(direction, loss, outputs, label_index, attr_index, first_sibling, last_sibling)
+                    self.calculate_loss(loss, outputs, label_index, attr_index, first_sibling, last_sibling)
             ctr = tf.add(ctr, 1) if direction == 'forward' else tf.subtract(ctr, 1)
             #ctr = tf.Print(ctr, [ctr])
 
             return loss, ctr, dependency_states, children_tmp_states, children_output, children_tmp_output, \
-                   label_probabilities, attr_probabilities, predicted_p_first
+                   label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
         return loop_body
 
     directions = set()
@@ -484,7 +496,7 @@ class TRNNModel(object):
         # XXX the last three args are just there because we need a tensor of the correct size. better way?
         # do children_tmp_* arrays not have to be passed in here?
         loss, ctr, dependency_states, children_tmp_states, children_output, children_tmp_output, \
-            label_probabilities, attr_probabilities, predicted_p_first = \
+            label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
             tf.while_loop(loop_cond_wrapper(direction), loop_body_wrapper(direction),
                           [loss,
                            ctr,
@@ -492,15 +504,16 @@ class TRNNModel(object):
                            children_tmp_states,
                            children_output,
                            children_tmp_output,
-                           tf.zeros([1,vocab_size], tf.float32), # label_probabilities
+                           tf.zeros([1,label_size], tf.float32), # label_probabilities
                            tf.zeros([1,attr_size], tf.float32), # attr_probabilities
-                           0.0], # predicted_p_{first/last}
+                           0.0, 0.0], # predicted_p_{first/last}
                            parallel_iterations=1)
 
     # tensors we might want to have access to during inference
     self.fetches = {
         #'predicted_p_a': predicted_p_a.name,
         'predicted_p_first': predicted_p_first.name,
+        'predicted_p_last': predicted_p_last.name,
         'label_probabilities': label_probabilities.name,
         'attr_probabilities': attr_probabilities.name,
         'states': {}
@@ -537,9 +550,9 @@ class TRNNModel(object):
     self._lr_update = tf.assign(self._lr, self._new_lr)
 
 
-  def calculate_loss(self, direction, loss, outputs, label_index, attr_index, first_sibling, last_sibling):
+  def calculate_loss(self, loss, outputs, label_index, attr_index, first_sibling, last_sibling):
       size = self.size
-      vocab_size = self.vocab_size
+      label_size = self.label_size
       attr_size = self.attr_size
 
       # grab all of the projection paramaters, now that we have the current node's LSTM state
@@ -549,29 +562,17 @@ class TRNNModel(object):
               U[dependency] = tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
           u_last = tf.get_variable('u_last', [size], dtype=tf.float32)
           u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
-          #u_a = tf.get_variable('u_a', [size], dtype=tf.float32)
-          attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
-          attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
-          v_attr = tf.get_variable("v_attr", [vocab_size, attr_size], dtype=data_type())
 
-          softmax_w = tf.get_variable("softmax_w", [size, vocab_size], dtype=data_type())
-          softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
-          #v_a = tf.get_variable("v_a", [vocab_size], dtype=data_type())
-          v_first = tf.get_variable("v_first", [vocab_size], dtype=data_type())
-          v_last = tf.get_variable("v_last", [vocab_size], dtype=data_type())
+          softmax_w = tf.get_variable("softmax_w", [size, label_size + attr_size], dtype=data_type())
+          softmax_b = tf.get_variable("softmax_b", [label_size + attr_size], dtype=data_type())
+
+          v_first = tf.get_variable("v_first", [label_size + attr_size], dtype=data_type())
+          v_last = tf.get_variable("v_last", [label_size + attr_size], dtype=data_type())
 
       # this is the vector that combines the sibling and parent hidden states to be directly used in prediction
       h_pred = tf.zeros([1, size])
       for dependency in self.dependencies:
           h_pred += tf.matmul(outputs[dependency], U[dependency])
-
-      # predict whether there is a child node (a = ancestor)
-      #logits_p_a = tf.reduce_sum(tf.multiply(u_a, h_pred))
-      #predicted_p_a = tf.sigmoid(logits_p_a)
-      #logits_p_a = tf.expand_dims(logits_p_a, 0)
-      #actual_p_a = tf.expand_dims(is_leaf, 0)
-      ## XXX paper uses sigmoid. How does this compare to cross entropy?
-      #loss_p_a = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_a, labels=actual_p_a, name="p_a_loss")
 
       # predict where there is a sibling node (f = fraternal)
       logits_p_last = tf.reduce_sum(tf.multiply(u_last, h_pred))
@@ -591,29 +592,28 @@ class TRNNModel(object):
       # XXX Testing shouldn't necessarily use is_leaf and last_sibling directly, according to paper?
       # TODO: The paper doesn't seem to have a bias term. Could compare with and without
       #label_logits = tf.matmul(h_pred, softmax_w) + softmax_b + tf.multiply(v_a, is_leaf) + tf.multiply(v_f, last_sibling)
-      label_logits = tf.matmul(h_pred, softmax_w) + softmax_b #+ tf.Print(tf.multiply(v_first, first_sibling), [tf.multiply(v_first, first_sibling)], "blah")
+      logits = tf.matmul(h_pred, softmax_w) + softmax_b
 
-      # XXX name things...
+      label_logits = tf.slice(logits, [0, 0], [-1, label_size])
+      attr_logits = tf.slice(logits, [0, label_size], [-1, -1])
       label_probabilities = tf.nn.softmax(label_logits)
-      actual_label = tf.one_hot(label_index, vocab_size)
+      attr_probabilities = tf.nn.softmax(attr_logits)
+
+      actual_label = tf.one_hot(label_index, label_size)
       # TODO: switch this to use sparse_softmax?
       label_loss = tf.nn.softmax_cross_entropy_with_logits(logits=label_logits, labels=actual_label, name="label_loss")
 
-      attr_logits = tf.matmul(h_pred, attr_w) + attr_b + tf.matmul(tf.expand_dims(actual_label, 0), v_attr)
-      attr_probabilities = tf.nn.softmax(attr_logits)
       actual_attr = tf.one_hot(attr_index, attr_size)
       attr_loss = tf.nn.softmax_cross_entropy_with_logits(logits=attr_logits, labels=actual_attr, name="attr_loss")
 
 
       # TODO: could differ the weights for structural predictions vs the label predictions when calculating loss
-      #loss = tf.add(loss, tf.reduce_sum(loss_p_a))
-      #loss = tf.add(loss, tf.reduce_sum(loss_p_last))
-
+      # XXX XXX XXX somehow only include the correct directions (like, forward direction shouldn't affect loss_p_first?)
       loss = tf.add(loss, tf.reduce_sum(loss_p_last))
       loss = tf.add(loss, tf.reduce_sum(loss_p_first))
-
       loss = tf.add(loss, tf.reduce_sum(attr_loss))
       loss = tf.add(loss, tf.reduce_sum(label_loss))
+
       return loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
 
   def assign_lr(self, session, lr_value):
@@ -669,7 +669,8 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
         # these aren't used if is_inference is False, but it seems we still need
         # to feed them in evidently :-\
         for k in model.dependencies:
-            feed_dict[model.placeholders['inference'][k]] = 0
+            feed_dict[model.placeholders['inference'][k]['label']] = 0
+            feed_dict[model.placeholders['inference'][k]['attr']] = 0
 
         vals = session.run(fetches, feed_dict)
         cost = vals["cost"]
@@ -716,7 +717,7 @@ def main(_):
         raw_data['attr_to_id'] = token_ids['label_attrs']
 
     config = get_config()
-    config['vocab_size'] = len(raw_data['token_to_id'])
+    config['label_vocab_size'] = len(raw_data['token_to_id'])
     config['attr_vocab_size'] = len(raw_data['attr_to_id'])
 
     config['possible_dependencies'] = possible_dependencies
@@ -757,7 +758,10 @@ def main(_):
         for k in mtest.placeholders['data']:
             config['placeholders']['data'][k] = mtest.placeholders['data'][k].name
         for k in mtest.placeholders['inference']:
-            config['placeholders']['inference'][k] = mtest.placeholders['inference'][k].name
+            config['placeholders']['inference'][k] = {
+                'attr' : mtest.placeholders['inference'][k]['attr'].name,
+                'label' : mtest.placeholders['inference'][k]['label'].name
+            }
         config['placeholders']['is_inference'] = mtest.placeholders['is_inference'].name
         config['fetches'] = mtest.fetches
         config['feed'] = mtest.feed
