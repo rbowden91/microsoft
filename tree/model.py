@@ -41,7 +41,7 @@ SmallConfig = {
   "init_scale" : 0.1,
   "learning_rate" : 1.0,
   "max_grad_norm" : 5,
-  "num_layers" : 1,
+  "num_layers" : 2,
   "num_steps" : 20, # this isn't used at all in this file, since we aren't doing any truncated backpropagation
   "hidden_size" : 200,
   "max_epoch" : 4,
@@ -51,7 +51,8 @@ SmallConfig = {
   "batch_size" : 40, # currently, this is just 1
   #"dependencies" : ['children']
   #"dependencies" : ['children', 'right_sibling', 'parent', 'left_sibling']
-  "dependencies" : ['parent', 'left_sibling', 'left_prior']
+  #"dependencies" : ['parent', 'left_sibling', 'left_prior']
+  "dependencies" : ['children', 'right_sibling', 'right_prior']
 }
 
 MediumConfig = {
@@ -96,7 +97,8 @@ TestConfig = {
   "keep_prob" : 1.0,
   "lr_decay" : 0.5,
   "batch_size" : 20,
-  "dependencies" : ['children']
+  #"dependencies" : ['children']
+  "dependencies" : ['children', 'right_sibling', 'right_prior']
 }
 
 
@@ -443,7 +445,7 @@ class TRNNModel(object):
                             new_output, new_state = tf.cond(tf.cast(right_sibling, tf.bool), handle_not_last, handle_last, strict=True)
                             new_output.set_shape([1, size])
 
-                            ## save to parent
+                            # save to parent
                             handle_first = lambda state: (children_tmp_states,
                                                           save_lstm_state(state, new_state, parent),
                                                           children_tmp_output,
@@ -508,7 +510,7 @@ class TRNNModel(object):
         for j in range(len(dependency_states[i])):
             # for inference, we only care about the "root" node's state
             # children will end up writing the result to the parent
-            position = 1 if self.dependencies[i] == 'children' else 0
+            position = 1 if self.dependencies[i] != 'children' else 0
             self.fetches['states'][self.dependencies[i]].append({
                 'c': dependency_states[i][j][0].read(position).name,
                 'h': dependency_states[i][j][1].read(position).name,
@@ -738,14 +740,14 @@ def main(_):
         with tf.name_scope("Train"):
             with tf.variable_scope("TRNNModel", reuse=None, initializer=initializer):
                 m = TRNNModel(is_training=True, config=config)#, input_=raw_data['train'])
-            tf.summary.scalar("Training Loss", m.cost)
-            tf.summary.scalar("Learning Rate", m.lr)
+            tf.summary.scalar("Training_Loss", m.cost)
+            tf.summary.scalar("Learning_Rate", m.lr)
 
         # TODO: Can remove Valid and Training nodes from the saved model?
         with tf.name_scope("Valid"):
             with tf.variable_scope("TRNNModel", reuse=True, initializer=initializer):
                 mvalid = TRNNModel(is_training=False, config=config)
-            tf.summary.scalar("Validation Loss", mvalid.cost)
+            tf.summary.scalar("Validation_Loss", mvalid.cost)
 
         with tf.name_scope("Test"):
             with tf.variable_scope("TRNNModel", reuse=True, initializer=initializer):
