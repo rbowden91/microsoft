@@ -142,30 +142,33 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
     for k in config['fetches']:
         fetches[k] = config['fetches'][k]
 
-    def visit_tree(node):
+    def visit_tree(node, direction):
         if node.__class__.__name__ in dump_ast.ignore:
             return False
 
-        #children = node.children()
-        #for i in range(len(children) - 1, -1, -1):
-        #    visit_tree(children[i][1])
+        if direction == 'reverse':
+            children = node.children()
+            for i in range(len(children) - 1, -1, -1):
+                visit_tree(children[i][1], direction)
 
         props = node_properties[node]
 
-        label_index = raw_data['token_to_id'][props['label']] \
-                        if props['label'] in raw_data['token_to_id'] \
-                        else raw_data['token_to_id']['<unk_label>']
-        for (name, val) in props['attrs']:
-            if name in ['value', 'op', 'name']:
-                attr_index = tree_read.tokens_to_ids([[val]],
-                        raw_data['attr_to_id'], False)[0][0]
-                break
-        else:
-            attr_index = raw_data['attr_to_id']['<no_attr>']
+        # only need to do once
+        if direction == 'forward':
+            label_index = raw_data['token_to_id'][props['label']] \
+                            if props['label'] in raw_data['token_to_id'] \
+                            else raw_data['token_to_id']['<unk_label>']
+            for (name, val) in props['attrs']:
+                if name in ['value', 'op', 'name']:
+                    attr_index = tree_read.tokens_to_ids([[val]],
+                            raw_data['attr_to_id'], False)[0][0]
+                    break
+            else:
+                attr_index = raw_data['attr_to_id']['<no_attr>']
 
-        # remember the index for the future
-        props['label_index'] = label_index
-        props['attr_index'] = label_index
+            # remember the index for the future
+            props['label_index'] = label_index
+            props['attr_index'] = attr_index
 
         feed_dict = {
             config['placeholders']['is_inference']: True,
@@ -183,22 +186,24 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
             # go in the 1st
             # this fills in all inference values *except* for children
             if k in config['placeholders']['inference']:
+                if config['possible_dependencies'][k] != direction: continue
                 if k == 'children': continue
+
                 feed_dict[config['placeholders']['data'][k]] = [0, 0]
-                # should exist
+
+                # should exist, because we are going in the correct direction
                 dependency_node = props['dependencies'][k]
-                # XXX XXX XXX XXX XXX
-                if k not in ['left_sibling', 'parent', 'left_prior']: continue
-                feed_dict[config['placeholders']['inference'][k]] = node_properties[dependency_node]['label_index'] if dependency_node in node_properties else 0
+
+                feed_dict[config['placeholders']['inference'][k]['label']] = node_properties[dependency_node]['label_index'] if dependency_node in node_properties else 0
+                feed_dict[config['placeholders']['inference'][k]['attr']] = node_properties[dependency_node]['attr_index'] if dependency_node in node_properties else 0
             else:
                 feed_dict[config['placeholders']['data'][k]] = [0, props[k]]
 
-        feed_dict[config['placeholders']['inference']['children']] = label_index
+        feed_dict[config['placeholders']['inference']['children']['label']] = label_index
+        feed_dict[config['placeholders']['inference']['children']['attr']] = attr_index
 
         for dependency in config['dependencies']:
-            #print(dependency)
             for i in range(len(config['feed']['initial_states'][dependency])):
-                #print(i)
                 state = config['feed']['initial_states'][dependency][i]
                 if dependency == 'children':
                     if props['num_children'] != 0:
@@ -219,16 +224,14 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
                         feed_dict[state['h']] = initial_states[dependency][i].h
                 else:
                     dependency_node = props['dependencies'][dependency]
-                    #print("\n\n**\n\n")
-                    #print(dependency, dependency_node)
                     if dependency_node is not None:
                         dependency_props = node_properties[dependency_node]
                         feed_dict[state['c']] = dependency_props['states'][dependency][i]['c']
                         feed_dict[state['h']] = dependency_props['states'][dependency][i]['h']
                     else:
-                        #print(initial_states[dependency])
                         feed_dict[state['c']] = initial_states[dependency][i].c
                         feed_dict[state['h']] = initial_states[dependency][i].h
+
             if dependency == 'children':
                 if props['num_children'] == 0:
                     feed_dict[config['feed']['initial_output']] = initial_output
@@ -245,41 +248,46 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
         #print("\n\n")
         vals = session.run(fetches, feed_dict)
 
-        props['probabilities'] = probabilities = vals['label_probabilities'][0]
-        #### XXX ROB: do this in tensorflow?
-        expected_id = np.argmax(probabilities)
-        props['expected'] = raw_data['id_to_token'][expected_id]
-        props['expected_probability'] = probabilities[expected_id]
+        if True or direction == 'reverse':
+            props['probabilities'] = probabilities = vals['label_probabilities'][0]
+            expected_id = np.argmax(probabilities)
+            props['expected'] = raw_data['id_to_token'][expected_id]
+            props['expected_probability'] = probabilities[expected_id]
 
-        #target_id = raw_data['token_to_id'][node.__class__.__name__]
-        target_id = feed_dict[config['placeholders']['data']['label_index']][1]
-        props['target_probability'] = probabilities[target_id]
+            #target_id = raw_data['token_to_id'][node.__class__.__name__]
+            target_id = feed_dict[config['placeholders']['data']['label_index']][1]
+            props['target_probability'] = probabilities[target_id]
 
-        props['ratio'] = probabilities[target_id] / probabilities[expected_id]
+            props['ratio'] = probabilities[target_id] / probabilities[expected_id]
 
-        props['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
-        attr_expected_id = np.argmax(attr_probabilities)
-        # check <unk>
-        props['attr_expected'] = raw_data['id_to_attr'][attr_expected_id]
-        props['attr_expected_probability'] = attr_probabilities[attr_expected_id]
-        attr_target_id = feed_dict[config['placeholders']['data']['attr_index']][1]
-        props['attr_actual'] = raw_data['id_to_attr'][attr_target_id]
-        props['attr_target_probability'] = attr_probabilities[attr_target_id]
+            props['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
+            attr_expected_id = np.argmax(attr_probabilities)
+            # check <unk>
+            props['attr_expected'] = raw_data['id_to_attr'][attr_expected_id]
+            props['attr_expected_probability'] = attr_probabilities[attr_expected_id]
+            attr_target_id = feed_dict[config['placeholders']['data']['attr_index']][1]
+            props['attr_actual'] = raw_data['id_to_attr'][attr_target_id]
+            props['attr_target_probability'] = attr_probabilities[attr_target_id]
 
-        props['attr_ratio'] = attr_probabilities[attr_target_id] / attr_probabilities[attr_expected_id]
+            props['attr_ratio'] = attr_probabilities[attr_target_id] / attr_probabilities[attr_expected_id]
 
-        props['p_a'] = feed_dict[config['placeholders']['data']['last_sibling']][1]
-        props['p_f'] = vals['predicted_p_first']#vals['predicted_p_f']
+            props['p_a'] = feed_dict[config['placeholders']['data']['last_sibling']][1]
+            props['p_f'] = vals['predicted_p_first']#vals['predicted_p_f']
+
         props['states'] = vals['states']
+
         if 'children' in config['dependencies']:
             props['children_output'] = vals['children_output']
 
-        children = node.children()
-        for i in range(len(children)):
-            visit_tree(children[i][1])
+        if direction == 'forward':
+            children = node.children()
+            for i in range(len(children)):
+                visit_tree(children[i][1], direction)
+
         return True
 
-    visit_tree(ast)
+    visit_tree(ast, 'forward')
+    #visit_tree(ast, 'reverse')
 
     #target_probability = probabilities[data[step+1][0]]
     #max_probability = probabilities[m]

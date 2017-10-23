@@ -52,7 +52,7 @@ SmallConfig = {
   #"dependencies" : ['children']
   #"dependencies" : ['children', 'right_sibling', 'parent', 'left_sibling']
   "dependencies" : ['parent', 'left_sibling', 'left_prior']
-  #"dependencies" : ['children', 'right_sibling', 'right_prior']
+  #"dependencies" : ['right_sibling', 'right_prior']
 }
 
 MediumConfig = {
@@ -98,7 +98,7 @@ TestConfig = {
   "lr_decay" : 0.5,
   "batch_size" : 20,
   #"dependencies" : ['children']
-  #"dependencies" : ['children', 'right_sibling', 'right_prior']
+  #"dependencies" : ['right_sibling', 'right_prior']
   "dependencies" : ['left_sibling', 'parent', 'left_prior']
 }
 
@@ -230,21 +230,24 @@ class TRNNModel(object):
         # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
         for dependency in self.dependencies:
             tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
-        u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
         u_last = tf.get_variable('u_last', [size], dtype=tf.float32)
-        u_a = tf.get_variable('u_a', [size], dtype=tf.float32)
+        u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
 
-        softmax_w = tf.get_variable("softmax_w", [size, label_size + attr_size], dtype=data_type())
-        softmax_b = tf.get_variable("softmax_b", [label_size + attr_size], dtype=data_type())
+        attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
+        attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
+        v_attr = tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
 
-        v_first = tf.get_variable("v_first", [label_size + attr_size], dtype=data_type())
-        v_last = tf.get_variable("v_last", [label_size + attr_size], dtype=data_type())
+        softmax_w = tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
+        softmax_b = tf.get_variable("softmax_b", [label_size], dtype=data_type())
+
+        v_first = tf.get_variable("v_first", [label_size], dtype=data_type())
+        v_last = tf.get_variable("v_last", [label_size], dtype=data_type())
 
     with tf.device("/cpu:0"):
       label_embedding = tf.get_variable(
-          "label_embedding", [label_size, size], dtype=data_type())
+          "label_embedding", [label_size, size / 2], dtype=data_type())
       attr_embedding = tf.get_variable(
-          "attr_embedding", [attr_size, size], dtype=data_type())
+          "attr_embedding", [attr_size, size / 2], dtype=data_type())
 
     def lstm_cell(dependency, i):
         if dependency == 'children' and i == 0:
@@ -295,8 +298,10 @@ class TRNNModel(object):
 
         with tf.variable_scope("RNN", reuse=None):
             with tf.variable_scope(dependency, reuse=None):
+                # XXX fix this...
+                num_layers = config['num_layers'] if dependency != 'children' else 1
                 self.dependency_cells[dependency] = tf.contrib.rnn.MultiRNNCell(
-                    [attn_cell(dependency, i) for i in range(config['num_layers'])], state_is_tuple=True)
+                    [attn_cell(dependency, i) for i in range(num_layers)], state_is_tuple=True)
                 # XXX 1 is the batch_size
                 self.dependency_initial_states[dependency] = self.dependency_cells[dependency].zero_state(1, data_type())
 
@@ -320,12 +325,14 @@ class TRNNModel(object):
     if 'children' in self.dependencies:
         # extra stuff needed by the children dependency
         # 0 is the <nil> token
-        initial_embedding = tf.expand_dims(tf.gather(embedding, 0,
+        # XXX XXX don't currently handle attr_embedding at all right here
+        initial_embedding = tf.expand_dims(tf.gather(label_embedding, 0,
                                                         name=("InitialEmbedGather")), 0)
         # XXX need to make this into a variable in some way?
-        #initial_output, leaf_state = self.dependency_cells['children'](initial_embedding,
-        #                                                               self.dependency_initial_states['children'])
-        #self.feed['initial_output'] = initial_output.name
+        initial_output, leaf_state = self.dependency_cells['children'](initial_embedding,
+                                                                       self.dependency_initial_states['children'])
+        self.feed['initial_output'] = initial_output.name
+
         # extra TensorArrays for children, hurray!!
         children_tmp_states = initialize_lstm_array(self.dependency_initial_states['children'])
         children_output = tf.TensorArray(
@@ -405,11 +412,10 @@ class TRNNModel(object):
 
                 dependency_label_token, dependency_attr_token = tf.cond(self.placeholders['is_inference'], handle_inference, handle_training)
 
-                dependency_label_embedding = tf.expand_dims(tf.gather(label_embedding, dependency_label_token,
-                                                                name=(dependency+"EmbedGather")), 0)
-                dependency_attr_embedding = tf.expand_dims(tf.gather(attr_embedding, dependency_attr_token,
-                                                                name=(dependency+"EmbedGather")), 0)
-                dependency_embedding = dependency_label_embedding + dependency_attr_embedding
+                dependency_label_embedding = tf.gather(label_embedding, dependency_label_token, name=(dependency+"LabelEmbedGather"))
+                dependency_attr_embedding = tf.gather(attr_embedding, dependency_attr_token, name=(dependency+"AttrEmbedGather"))
+                dependency_embedding = tf.concat([dependency_label_embedding, dependency_attr_embedding], 0)
+                dependency_embedding = tf.expand_dims(dependency_embedding, 0)
 
                 with tf.variable_scope("RNN", reuse=None):
                     with tf.variable_scope(dependency, reuse=None):
@@ -563,11 +569,16 @@ class TRNNModel(object):
           u_last = tf.get_variable('u_last', [size], dtype=tf.float32)
           u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
 
-          softmax_w = tf.get_variable("softmax_w", [size, label_size + attr_size], dtype=data_type())
-          softmax_b = tf.get_variable("softmax_b", [label_size + attr_size], dtype=data_type())
+          attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
+          attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
+          v_attr = tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
 
-          v_first = tf.get_variable("v_first", [label_size + attr_size], dtype=data_type())
-          v_last = tf.get_variable("v_last", [label_size + attr_size], dtype=data_type())
+          softmax_w = tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
+          softmax_b = tf.get_variable("softmax_b", [label_size], dtype=data_type())
+
+          v_first = tf.get_variable("v_first", [label_size], dtype=data_type())
+          v_last = tf.get_variable("v_last", [label_size], dtype=data_type())
+
 
       # this is the vector that combines the sibling and parent hidden states to be directly used in prediction
       h_pred = tf.zeros([1, size])
@@ -592,17 +603,16 @@ class TRNNModel(object):
       # XXX Testing shouldn't necessarily use is_leaf and last_sibling directly, according to paper?
       # TODO: The paper doesn't seem to have a bias term. Could compare with and without
       #label_logits = tf.matmul(h_pred, softmax_w) + softmax_b + tf.multiply(v_a, is_leaf) + tf.multiply(v_f, last_sibling)
-      logits = tf.matmul(h_pred, softmax_w) + softmax_b
+      label_logits = tf.matmul(h_pred, softmax_w) + softmax_b #+ tf.Print(tf.multiply(v_first, first_sibling), [tf.multiply(v_first, first_sibling)], "blah")
 
-      label_logits = tf.slice(logits, [0, 0], [-1, label_size])
-      attr_logits = tf.slice(logits, [0, label_size], [-1, -1])
+      # XXX name things...
       label_probabilities = tf.nn.softmax(label_logits)
-      attr_probabilities = tf.nn.softmax(attr_logits)
-
       actual_label = tf.one_hot(label_index, label_size)
       # TODO: switch this to use sparse_softmax?
       label_loss = tf.nn.softmax_cross_entropy_with_logits(logits=label_logits, labels=actual_label, name="label_loss")
 
+      attr_logits = tf.matmul(h_pred, attr_w) + attr_b + tf.matmul(tf.expand_dims(actual_label, 0), v_attr)
+      attr_probabilities = tf.nn.softmax(attr_logits)
       actual_attr = tf.one_hot(attr_index, attr_size)
       attr_loss = tf.nn.softmax_cross_entropy_with_logits(logits=attr_logits, labels=actual_attr, name="attr_loss")
 
