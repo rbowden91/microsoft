@@ -20,6 +20,11 @@ def linearize_ast(ast, ret=[], parent=0, sibling=0, prior=0, first_sibling=True,
         return False
 
     nvlist = [(n, getattr(ast,n)) for n in ast.attr_names]
+    # Fix up IDs...
+    for i in range(len(nvlist)):
+        if nvlist[i][0]  == 'name':
+            if nvlist[i][1] not in set(['argc', 'argv', 'printf', 'strlen', 'isalpha', 'isupper', 'islower', 'main', 'GetString']):
+                nvlist[i] = (nvlist[i][0], 'ID')
 
     my_node_num = len(ret) + 1
 
@@ -33,7 +38,7 @@ def linearize_ast(ast, ret=[], parent=0, sibling=0, prior=0, first_sibling=True,
         'right_sibling': 0, # if there is a right sibling, then that sibling will set this value
                             # on the current node when we reach it
         'left_prior': prior,
-        'right_prior': 0, # same as with righ sibling
+        'right_prior': 0, # same as with right sibling
 
         'first_sibling': first_sibling,
         'last_sibling': last_sibling,

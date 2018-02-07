@@ -1,5 +1,5 @@
 cd ../vigenere/correct15
-for i in 13*; do
+for i in 1*; do
     echo $i
     cd $i
     path=`pwd`

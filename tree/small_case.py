@@ -1,3 +1,4 @@
+# XXX tensorflow bug example??
 # Largely based on Tree-Structured Decoding with Doublyrecurrent Neural Networks
 # (https://openreview.net/pdf?id=HkYhZDqxg)
 

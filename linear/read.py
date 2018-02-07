@@ -27,7 +27,7 @@ config = {
     # could also be changed to number of files it appears in
     'unk_cutoff': 0.01,
     # if None, will be auto-filled with total number of files
-    'num_files': 100#None
+    'num_files': 10#None
 }
 
 # requires getting preprocessing out of the way...
@@ -98,17 +98,16 @@ def tokens_to_ids(tokens, token_to_id, include_token):
     for i in range(len(tokens)):
         output.append([])
         # XXX XXX XXX Check if this still works in training
-        #for j in range(len(tokens[i])):
-        #    token = tokens[i][j]
-        token = tokens[i]
-        if token in token_to_id:
-            id = token_to_id[token]
-        elif token.startswith('"'):
-            id = token_to_id['<unk_str>']
-        else:
-            id = token_to_id['<unk>']
-        output[i].append((id, token) if include_token else id)
-    #print(output)
+        for j in range(len(tokens[i])):
+            token = tokens[i][j]
+            if token in token_to_id:
+                id = token_to_id[token]
+            elif token.startswith('"'):
+                id = token_to_id['<unk_str>']
+            else:
+                id = token_to_id['<unk>']
+            output[i].append((id, token) if include_token else id)
+    print(output)
     return output
 
 
@@ -177,6 +176,7 @@ def main(path):
         queues[i]['queue'].join()
 
     cutoff = config['num_files'] * config['train_fraction'] * config['unk_cutoff']
+    print(queues)
 
     # XXX why aren't I just pulling from lexicon??
     tokens = set([token for lst in queues['train']['tokens'] for token in lst if lexicon[token] > cutoff])

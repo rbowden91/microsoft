@@ -270,24 +270,9 @@ class TRNNModel(object):
         return tf.contrib.rnn.DropoutWrapper(
             lstm_cell(dependency), output_keep_prob=config['keep_prob'])
 
-    self.placeholders = { 'data': {}, 'inference': {} }
-    for k in config['placeholders']['data']:
-        self.placeholders['data'][k] = tf.placeholder(tf.int32, [None], name=k+'_placeholder')
-
-    # XXX XXX XXX better way of doing this? Basically, when doing inference, we want to be able to have different nodes
-    # for each dependency, but we only use the Initial States as a place to write, which all are
-    # associated with node 0
-
-    self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
-    for k in possible_dependencies:
-        self.placeholders['inference'][k] = {
-            'attr' : tf.placeholder(tf.int32, [], name='inference_' + k + '_attr_placeholder'),
-            'label' : tf.placeholder(tf.int32, [], name='inference_' + k + '_label_placeholder')
-        }
-    self.placeholders['inference']['self'] = {
-        'attr' : tf.placeholder(tf.int32, [], name='inference_self_attr_placeholder'),
-        'label' : tf.placeholder(tf.int32, [], name='inference_self_label_placeholder')
-    }
+    self.placeholders = {}
+    for k in config['placeholders']:
+        self.placeholders[k] = tf.placeholder(tf.int32, [None], name=k+'_placeholder')
 
     self.dependency_initial_states = dict()
     self.dependency_cells = dict()
@@ -298,16 +283,11 @@ class TRNNModel(object):
     dependency_states = []
     dependency_outputs = []
 
-    def embed(index, dependency):
-        label_index = tf.cond(self.placeholders['is_inference'],
-                              lambda: self.placeholders['inference'][dependency]['label'],
-                              lambda: tf.gather(self.placeholders['data']['label_index'], index,
-                                  name="LabelIndexGather"))
-
-        attr_index = tf.cond(self.placeholders['is_inference'],
-                              lambda: self.placeholders['inference'][dependency]['attr'],
-                              lambda: tf.gather(self.placeholders['data']['attr_index'], index,
-                                  name="AttrIndexGather"))
+    def embed(index):
+        label_index = tf.gather(self.placeholders['label_index'], index,
+                                        name="LabelIndexGather")
+        attr_index = tf.gather(self.placeholders['attr_index'], index,
+                                        name="AttrIndexGather")
         node_label_embedding = tf.gather(label_embedding, label_index,
                                             name="LabelEmbedGather")
         node_attr_embedding = tf.gather(attr_embedding, attr_index,
@@ -325,8 +305,7 @@ class TRNNModel(object):
             with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j)):
                 self.dependency_cells[dependency].append(attn_cell(dependency))
                 self.dependency_initial_states[dependency].append(self.dependency_cells[dependency][j].zero_state(1, data_type()))
-                inp = embed(0, dependency) if dependency != 'children' \
-                        else tf.stack([embed(0, dependency), embed(0, dependency)])
+                inp = embed(0) if dependency != 'children' else tf.stack([embed(0), embed(0)])
                 self.dependency_cells[dependency][j](inp, self.dependency_initial_states[dependency][j])
 
         # Need to manually handle LSTM states. This is gross.
@@ -343,7 +322,7 @@ class TRNNModel(object):
         # since we only use the TensorArray below, write the initial state in position 0. children needs to write
         # final output there, though
         if self.dependencies[i] != 'children':
-            cur_input = embed(0, self.dependencies[i])
+            cur_input = embed(0)
             for j in range(num_layers):
                 with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j), reuse=True):
                     (cur_input, next_state) = self.dependency_cells[dependency][j](cur_input,
@@ -373,7 +352,7 @@ class TRNNModel(object):
 
         # extra stuff needed by the children dependency
         # 0 is the <nil> token
-        initial_embedding = embed(0, 'children')
+        initial_embedding = embed(0)
 
 
         cur_input = initial_embedding
@@ -407,7 +386,7 @@ class TRNNModel(object):
     #  inputs = tf.nn.dropout(inputs, config['keep_prob'])
 
     # this returns true as long as the loop counter is less than the length of the example
-    total_data = tf.squeeze(tf.shape(self.placeholders['data']['is_leaf']))
+    total_data = tf.squeeze(tf.shape(self.placeholders['is_leaf']))
     def loop_cond_wrapper(direction):
         def loop_cond (loss, ctr, h_pred, dependency_states, dependency_outputs,
                        children_tmp_states, children_output, children_predictor_states,
@@ -424,15 +403,15 @@ class TRNNModel(object):
                       label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
 
             # to be accurate
-            is_leaf = tf.cast(tf.gather(self.placeholders['data']['is_leaf'], ctr, name="IsLeafGather"), tf.float32)
-            first_sibling = tf.cast(tf.gather(self.placeholders['data']['first_sibling'], ctr), tf.float32)
-            last_sibling = tf.cast(tf.gather(self.placeholders['data']['last_sibling'], ctr, name="LastSiblingGather"), tf.float32)
-            label_index = tf.gather(self.placeholders['data']['label_index'], ctr, name="NodeIndexGather")
-            attr_index = tf.gather(self.placeholders['data']['attr_index'], ctr, name="AttrIndexGather")
-            parent = tf.gather(self.placeholders['data']['parent'], ctr)
-            left_sibling = tf.gather(self.placeholders['data']['left_sibling'], ctr)
-            right_sibling = tf.gather(self.placeholders['data']['right_sibling'], ctr)
-            num_children = tf.cast(tf.gather(self.placeholders['data']['num_children'], ctr,
+            is_leaf = tf.cast(tf.gather(self.placeholders['is_leaf'], ctr, name="IsLeafGather"), tf.float32)
+            first_sibling = tf.cast(tf.gather(self.placeholders['first_sibling'], ctr), tf.float32)
+            last_sibling = tf.cast(tf.gather(self.placeholders['last_sibling'], ctr, name="LastSiblingGather"), tf.float32)
+            label_index = tf.gather(self.placeholders['label_index'], ctr, name="NodeIndexGather")
+            attr_index = tf.gather(self.placeholders['attr_index'], ctr, name="AttrIndexGather")
+            parent = tf.gather(self.placeholders['parent'], ctr)
+            left_sibling = tf.gather(self.placeholders['left_sibling'], ctr)
+            right_sibling = tf.gather(self.placeholders['right_sibling'], ctr)
+            num_children = tf.cast(tf.gather(self.placeholders['num_children'], ctr,
                                              name="AttrIndexGather"), tf.float32)
             h_pred_ctr = tf.squeeze(tf.gather(h_pred, [ctr]))
 
@@ -447,12 +426,25 @@ class TRNNModel(object):
                 # During inference, we want to use the directly-supplied label for the parent, since each node is passed in
                 # one-by-one and we won't have access to the parent when the child is passed in. During training, we have
                 # all nodes in the example at once, so can directly grab the parent's label
-                dependency_node = tf.cond(self.placeholders['is_inference'],
-                                          lambda: 0,
-                                          lambda: tf.gather(self.placeholders['data'][dependency], ctr,
-                                              name=(dependency+"Gather")) if dependency != 'children' else None)
+                dependency_node = tf.gather(self.placeholders[dependency], ctr, name=(dependency+"Gather")) if dependency != 'children' else None
 
-                node_embedding = embed(ctr, 'self')
+                #handle_inference = lambda: (self.placeholders['inference'][dependency]['label'], \
+                #                            self.placeholders['inference'][dependency]['attr'])
+                #handle_training = lambda: (tf.gather(self.placeholders['label_index'], dependency_node,
+                #                                    name=(dependency+"TokenGatherLabel")), \
+                #                          tf.gather(self.placeholders['attr_index'], dependency_node,
+                #                                    name=(dependency+"TokenGatherAttr")))
+
+                #dependency_label_token, dependency_attr_token = tf.cond(self.placeholders['is_inference'],
+                #                                                        handle_inference, handle_training)
+
+                #dependency_label_embedding = tf.gather(label_embedding, dependency_label_token,
+                #                                       name=(dependency+"LabelEmbedGather"))
+                #dependency_attr_embedding = tf.gather(attr_embedding, dependency_attr_token,
+                #                                      name=(dependency+"AttrEmbedGather"))
+                #dependency_embedding = tf.concat([dependency_label_embedding, dependency_attr_embedding], 0)
+                #dependency_embedding = tf.expand_dims(dependency_embedding, 0)
+                node_embedding = embed(ctr)
 
 
                 if layer == 0:
@@ -501,8 +493,7 @@ class TRNNModel(object):
 
                     # XXX XXX this needs to be fixed for inference :-X
                     if layer == 0:
-                        # XXX XXX XXX
-                        parent_embedding = embed(parent, 'XXX')
+                        parent_embedding = embed(parent)
                     else:
                         parent_embedding = dependency_outputs[i][layer-1].read(parent)
                         parent_embedding.set_shape([1, size])
@@ -577,6 +568,7 @@ class TRNNModel(object):
 
             #ctr = tf.Print(ctr, [ctr])
             ctr = tf.add(ctr, 1) if direction == 'forward' else tf.subtract(ctr, 1)
+            ctr = tf.Print(ctr, [ctr])
 
 
             return loss, ctr, h_pred, dependency_states, dependency_outputs, \
@@ -624,17 +616,15 @@ class TRNNModel(object):
                             0.0, 0.0], # predicted_p_{first/last}
                             parallel_iterations=1)
 
-    self._cost = cost = tf.reduce_sum(loss)
-
-
     # tensors we might want to have access to during inference
     self.fetches = {
-        'cost': self._cost.name,
         'predicted_p_first': predicted_p_first.name,
         'predicted_p_last': predicted_p_last.name,
         'label_probabilities': label_probabilities.name,
         'attr_probabilities': attr_probabilities.name,
+        'initial_outputs': {},
         'states': {},
+        'outputs': {}
     }
     for i in range(len(self.dependencies)):
         dep = self.dependencies[i]
@@ -647,6 +637,8 @@ class TRNNModel(object):
                 'c': dependency_states[i][j][0].read(position).name,
                 'h': dependency_states[i][j][1].read(position).name,
             })
+        self.fetches['outputs'][dep] = dependency_outputs[i][num_layers-1].read(1).name
+        self.fetches['initial_outputs'][dep] = dependency_outputs[i][num_layers-1].read(0).name
     if 'children' in self.dependencies:
         self.fetches['children_output'] = children_output.read(0).name
 
@@ -654,6 +646,7 @@ class TRNNModel(object):
     # the feed_dict
     self.feed = {
         'initial_states': {},
+        'initial_outputs': {}
     }
     for i in range(len(self.dependencies)):
         dependency = self.dependencies[i]
@@ -664,6 +657,10 @@ class TRNNModel(object):
                 'c': self.dependency_initial_states[dependency][j].c.name,
                 'h': self.dependency_initial_states[dependency][j].h.name
             })
+        self.feed['initial_outputs'][dependency] = dependency_outputs[i][num_layers-1].read(0).name
+
+
+    self._cost = cost = tf.reduce_sum(loss)
 
     if not is_training:
       return
@@ -757,7 +754,7 @@ class TRNNModel(object):
 
   @property
   def cost(self):
-    return self._cost
+    return tf.Print(self._cost, [self._cost])
 
   @property
   def final_state(self):
@@ -788,19 +785,11 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
     epoch_size = len(data['is_leaf'])
 
     for step in range(epoch_size):
-        feed_dict = { model.placeholders['is_inference']: False }
+        feed_dict = {}
 
         # TODO: some of these placeholders might be unused, if the data isn't used. can filter out
         for k in data:
-            feed_dict[model.placeholders['data'][k]] = data[k][step]
-
-        # these aren't used if is_inference is False, but it seems we still need
-        # to feed them in evidently :-\
-        for k in model.dependencies:
-            feed_dict[model.placeholders['inference'][k]['label']] = 0
-            feed_dict[model.placeholders['inference'][k]['attr']] = 0
-        feed_dict[model.placeholders['inference']['self']['label']] = 0
-        feed_dict[model.placeholders['inference']['self']['attr']] = 0
+            feed_dict[model.placeholders[k]] = data[k][step]
 
         vals = session.run(fetches, feed_dict)
         cost = vals["cost"]
@@ -853,13 +842,10 @@ def main(_):
     config['possible_dependencies'] = possible_dependencies
     config['dependencies'] = FLAGS.dependencies.split()
 
-    config['placeholders'] = {
-        'data': {},
-        'inference': {}
-    }
+    config['placeholders'] = {}
     # this needs to be populated so model initialization can quickly create the appropriate placeholders
     for k in raw_data['train']:
-        config['placeholders']['data'][k] = None
+        config['placeholders'][k] = None
 
     eval_config = config.copy()
     #eval_config['batch_size'] = 1
@@ -886,14 +872,8 @@ def main(_):
                 mtest = TRNNModel(is_training=False, config=eval_config)
 
         # save stuff to be used later in inference
-        for k in mtest.placeholders['data']:
-            config['placeholders']['data'][k] = mtest.placeholders['data'][k].name
-        for k in mtest.placeholders['inference']:
-            config['placeholders']['inference'][k] = {
-                'attr' : mtest.placeholders['inference'][k]['attr'].name,
-                'label' : mtest.placeholders['inference'][k]['label'].name
-            }
-        config['placeholders']['is_inference'] = mtest.placeholders['is_inference'].name
+        for k in mtest.placeholders:
+            config['placeholders'][k] = mtest.placeholders[k].name
         config['fetches'] = mtest.fetches
         config['feed'] = mtest.feed
 

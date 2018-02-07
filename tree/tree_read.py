@@ -21,7 +21,7 @@ config = {
     # could also be changed to number of files it appears in
     'unk_cutoff': 0.01,
     # if None, will be auto-filled with total number of files
-    'num_files': 1000#None
+    'num_files': 10#None
 }
 
 # XXX this should just be attrs_to_ids
@@ -70,6 +70,7 @@ def process_queue(queues, lexicon, lock):
                 # transform attrs to a (XXX single) attr index
                 for (name, val) in data[i]['attrs']:
                     if name in ['value', 'op', 'name']:
+                        # XXX hard code acceptable names...
                         if key == "train":
                             with lock:
                                 if val not in lexicon['label_attrs']:
