@@ -253,7 +253,7 @@ class TRNNModel(object):
 
     with tf.device("/cpu:0"):
       label_embedding = tf.get_variable(
-          "label_embedding", [label_size, size / 2], dtype=data_type())
+          "label_embedding", [label_size, size ], dtype=data_type())
       attr_embedding = tf.get_variable(
           "attr_embedding", [attr_size, size / 2], dtype=data_type())
 
@@ -290,6 +290,7 @@ class TRNNModel(object):
     }
 
     self.dependency_initial_states = dict()
+    self.dependency_initial_outputs = dict()
     self.dependency_cells = dict()
 
     # dependency_states can't be a dictionary on sibling/parent, since it needs to be convertible to a tensor (required
@@ -312,7 +313,7 @@ class TRNNModel(object):
                                             name="LabelEmbedGather")
         node_attr_embedding = tf.gather(attr_embedding, attr_index,
                                         name="AttrEmbedGather")
-        node_embedding = tf.concat([node_label_embedding, node_attr_embedding], 0)
+        node_embedding = node_label_embedding#tf.concat([node_label_embedding, node_attr_embedding], 0)
         return tf.expand_dims(node_embedding, 0)
 
     for i in range(len(self.dependencies)):
@@ -321,13 +322,11 @@ class TRNNModel(object):
         # XXX best I can tell, there is a tensorflow bug that causes basic_lstm_cell/basic_lstm_cell_1 issues...
         self.dependency_cells[dependency] = []
         self.dependency_initial_states[dependency] = []
+        self.dependency_initial_outputs[dependency] = []
         for j in range(num_layers):
             with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j)):
                 self.dependency_cells[dependency].append(attn_cell(dependency))
                 self.dependency_initial_states[dependency].append(self.dependency_cells[dependency][j].zero_state(1, data_type()))
-                inp = embed(0, dependency) if dependency != 'children' \
-                        else tf.stack([embed(0, dependency), embed(0, dependency)])
-                self.dependency_cells[dependency][j](inp, self.dependency_initial_states[dependency][j])
 
         # Need to manually handle LSTM states. This is gross.
         dependency_states.append(initialize_lstm_array(self.dependency_initial_states[dependency]))
@@ -345,12 +344,15 @@ class TRNNModel(object):
         if self.dependencies[i] != 'children':
             cur_input = embed(0, self.dependencies[i])
             for j in range(num_layers):
-                with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j), reuse=True):
+                with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j), reuse=tf.AUTO_REUSE):
                     (cur_input, next_state) = self.dependency_cells[dependency][j](cur_input,
-                                                self.dependency_initial_states[dependency][j])
-                dependency_states[i][j] =  save_lstm_state(dependency_states[i][j],
-                                                           next_state, 0)
-                dependency_outputs[i][j] = dependency_outputs[i][j].write(0, cur_input)
+                                                                                   self.dependency_initial_states[dependency][j])
+                    dependency_states[i][j] = save_lstm_state(dependency_states[i][j],
+                                                               self.dependency_initial_states[dependency][j], 0)
+                    
+                    self.dependency_initial_outputs[dependency].append(cur_input)
+                    dependency_outputs[i][j] = dependency_outputs[i][j].write(0,
+                                                    self.dependency_initial_outputs[dependency][j])
 
 
 
@@ -468,7 +470,7 @@ class TRNNModel(object):
                                                 self.dependency_initial_states[dependency][layer],
                                                 dependency_node)
 
-                    with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer), reuse=True):
+                    with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer)):
                         (output, new_state) = self.dependency_cells[dependency][layer](inp, state)
 
                     dependency_states[i][layer] = save_lstm_state(dependency_states[i][layer], new_state, ctr)
@@ -635,18 +637,23 @@ class TRNNModel(object):
         'label_probabilities': label_probabilities.name,
         'attr_probabilities': attr_probabilities.name,
         'states': {},
+        'outputs': {},
     }
     for i in range(len(self.dependencies)):
         dep = self.dependencies[i]
         self.fetches['states'][dep] = []
+        self.fetches['outputs'][dep] = []
         position = 1 if dep != 'children' else 0
-        for j in range(len(dependency_states[i])):
+        for j in range(num_layers):
             # for inference, we only care about the "root" node's state
             # children will end up writing the result to the parent
             self.fetches['states'][dep].append({
                 'c': dependency_states[i][j][0].read(position).name,
                 'h': dependency_states[i][j][1].read(position).name,
             })
+            self.fetches['outputs'][dep].append(
+                dependency_outputs[i][j].read(position).name
+            )
     if 'children' in self.dependencies:
         self.fetches['children_output'] = children_output.read(0).name
 
@@ -654,16 +661,21 @@ class TRNNModel(object):
     # the feed_dict
     self.feed = {
         'initial_states': {},
+        'initial_outputs': {},
     }
     for i in range(len(self.dependencies)):
         dependency = self.dependencies[i]
         self.feed['initial_states'][dependency] = []
+        self.feed['initial_outputs'][dependency] = []
         # save this so we can manipulate the initial state when trying to perform inference
         for j, (c, h) in enumerate(self.dependency_initial_states[dependency]):
             self.feed['initial_states'][dependency].append({
                 'c': self.dependency_initial_states[dependency][j].c.name,
                 'h': self.dependency_initial_states[dependency][j].h.name
             })
+            self.feed['initial_outputs'][dependency].append(
+                self.dependency_initial_outputs[dependency][j].name
+            )
 
     if not is_training:
       return

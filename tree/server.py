@@ -137,7 +137,7 @@ def print_ast(ast, node_properties):
     return output
 
 
-def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states):
+def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states, initial_outputs):
     fetches = {}
     for k in config['fetches']:
         fetches[k] = config['fetches'][k]
@@ -200,6 +200,7 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
 
             for i in range(len(config['feed']['initial_states'][dependency])):
                 state = config['feed']['initial_states'][dependency][i]
+                output = config['feed']['initial_outputs'][dependency][i]
                 #if dependency == 'children':
                 #    if props['num_children'] != 0:
                 #        state_c = 0
@@ -227,9 +228,11 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
                         dependency_props = node_properties[dependency_node]
                         feed_dict[state['c']] = dependency_props['states'][dependency][i]['c']
                         feed_dict[state['h']] = dependency_props['states'][dependency][i]['h']
+                        feed_dict[output] = dependency_props['outputs'][dependency][i]
                     else:
                         feed_dict[state['c']] = initial_states[dependency][i].c
                         feed_dict[state['h']] = initial_states[dependency][i].h
+                        feed_dict[output] = initial_outputs[dependency][i]
 
             #if dependency == 'children':
             #    if props['num_children'] == 0:
@@ -272,14 +275,14 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
 
         if 'states' not in props:
             props['states'] = {}
+            props['outputs'] = {}
         props['states'].update(vals['states'])
+        props['outputs'].update(vals['outputs'])
 
         if 'children' in config['dependencies']:
             props['children_output'] = vals['children_output']
 
         cost = vals['cost']
-        if label_index == raw_data['token_to_id']['FileAST']:
-            print(vals, cost)
 
         if direction == 'forward':
             children = node.children()
@@ -365,25 +368,31 @@ def main(_):
 
             #initial_output = session.run([config['feed']['initial_output']])[0] if 'children' in config['dependencies'] else 0
 
-            feed_dict = {}
-            feed_dict[config['placeholders']['is_inference']] = True
-            for i in config['placeholders']['data']:
-                feed_dict[config['placeholders']['data'][i]] = [0]
-            for i in config['placeholders']['inference']:
-                feed_dict[config['placeholders']['inference'][i]['attr']] = 0
-                feed_dict[config['placeholders']['inference'][i]['label']] = 0
             initial_states = {}
+            initial_outputs = {}
+
+            feed_dict = {
+                config['placeholders']['is_inference']: True
+            }
+
+            for k in config['placeholders']['inference']:
+                feed_dict[config['placeholders']['inference'][k]['label']] = 0
+                feed_dict[config['placeholders']['inference'][k]['attr']] = 0
+            for k in config['placeholders']['data']:
+                feed_dict[config['placeholders']['data'][k]] = [0]
+            feed_dict[config['placeholders']['inference']['self']['label']] = 0
+            feed_dict[config['placeholders']['inference']['self']['attr']] = 0
+
 
             for k in config['feed']['initial_states']:
                 initial_states[k] = []
-                #initial_outputs[k] = []
+                initial_outputs[k] = []
                 for i in range(len(config['feed']['initial_states'][k])):
                     c, h = session.run([config['feed']['initial_states'][k][i]['c'],
                                         config['feed']['initial_states'][k][i]['h']])
                     # don't really need to wrap this up in an LSTM tuple
                     initial_states[k].append(tf.contrib.rnn.LSTMStateTuple(c, h))
-
-                #initial_outputs[k] = session.run([config['feed']['initial_outputs'][k]], feed_dict)[0]
+                    initial_outputs[k].append(session.run([config['feed']['initial_outputs'][k][i]], feed_dict)[0])
 
             parser = c_parser.CParser()
             while True:
@@ -406,7 +415,7 @@ def main(_):
                     # extend objects
                     node_properties = {}
                     ret = dump_ast.linearize_ast(ast, node_properties=node_properties) # XXX how slow is this?
-                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states)
+                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states, initial_outputs)
                     code = "blah"#search(ast, node_properties, filename, directives)
                     output = {
                         'ast': print_ast(ast, node_properties),
