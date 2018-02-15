@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import sys
 import inspect
+from pprint import pprint
 import time
 import json
 import os
@@ -137,24 +138,24 @@ def print_ast(ast, node_properties):
     return output
 
 
-def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states, initial_outputs):
-    fetches = {}
-    for k in config['fetches']:
-        fetches[k] = config['fetches'][k]
-
+def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
     directions = set()
     for k in config['dependencies']:
         directions.add(config['possible_dependencies'][k])
     directions = sorted(list(directions))
 
-    def visit_tree(node, direction):
+    def visit_tree(node, direction, layer):
         if node.__class__.__name__ in dump_ast.ignore:
             return False
 
+        cost = 0
         if direction == 'reverse':
             children = node.children()
             for i in range(len(children) - 1, -1, -1):
-                visit_tree(children[i][1], direction)
+                cost += visit_tree(children[i][1], direction, layer)
+
+        is_last_layer = layer == config['num_layers'] - 1
+        include_cost = is_last_layer and (direction == 'reverse' or len(directions) == 1)
 
         props = node_properties[node]
 
@@ -175,79 +176,133 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
             props['label_index'] = label_index
             props['attr_index'] = attr_index
 
+        fetches = {
+            'states': {},
+            'outputs': {}
+        }
+        for k in config['fetches']['outputs']:
+            if k != 'children':
+                fetches['states'][k] = { layer: config['fetches']['states'][k][layer] }
+            fetches['outputs'][k] = { layer: config['fetches']['outputs'][k][layer] }
+
+        if direction == 'reverse' and 'children' in config['dependencies']:
+            if is_last_layer:
+                fetches['children_predictor_states'] = { layer: config['fetches']['children_predictor_states'][layer] }
+            if props['dependencies']['left_sibling'] is not None:
+                fetches['children_tmp_states'] = { layer: config['fetches']['children_tmp_states'][layer] }
+            else:
+                fetches['states']['children'] = { layer: config['fetches']['states']['children'][layer] }
+                if is_last_layer:
+                    fetches['children_output'] = config['fetches']['children_output']
+        if include_cost:
+            for k in ['cost', 'predicted_p_first', 'predicted_p_last', 'label_probabilities', 'attr_probabilities']:
+                fetches[k] = config['fetches'][k]
+
         feed_dict = {
-            config['placeholders']['data']['num_children']: [0, 0],
-            config['placeholders']['is_inference']: True
+            config['placeholders']['is_inference']: True,
+            config['feed']['leaf_input']: initial['leaf_input']
         }
 
         for k in config['placeholders']['data']:
-            # already filled them in above
-            if config['placeholders']['data'][k] in feed_dict:
-                continue
             feed_dict[config['placeholders']['data'][k]] = [0, props[k]]
+
         feed_dict[config['placeholders']['inference']['self']['label']] = props['label_index']
         feed_dict[config['placeholders']['inference']['self']['attr']] = props['attr_index']
 
         for dependency in config['dependencies']:
-            dependency_node = props['dependencies'][dependency]
+
+            # the children lstm needs to look at the parent
+            key = dependency if dependency != 'children' else 'parent'
+            dependency_node = props['dependencies'][key]
             if dependency_node is not None and 'states' in node_properties[dependency_node]:
                 dependency_props = node_properties[dependency_node]
-                feed_dict[config['placeholders']['inference'][dependency]['label']] = dependency_props['label_index']
-                feed_dict[config['placeholders']['inference'][dependency]['attr']] = dependency_props['attr_index']
+                feed_dict[config['placeholders']['inference'][key]['label']] = dependency_props['label_index']
+                feed_dict[config['placeholders']['inference'][key]['attr']] = dependency_props['attr_index']
             else:
-                feed_dict[config['placeholders']['inference'][dependency]['label']] = 0
-                feed_dict[config['placeholders']['inference'][dependency]['attr']] = 0
+                feed_dict[config['placeholders']['inference'][key]['label']] = 0
+                feed_dict[config['placeholders']['inference'][key]['attr']] = 0
 
-            for i in range(len(config['feed']['initial_states'][dependency])):
-                state = config['feed']['initial_states'][dependency][i]
-                output = config['feed']['initial_outputs'][dependency][i]
-                #if dependency == 'children':
-                #    if props['num_children'] != 0:
-                #        state_c = 0
-                #        state_h = 0
-                #        children = node.children()
-                #        for j in range(len(children)):
-                #            # for excluded nodes (like declarations)
-                #            if children[j][1] not in node_properties:
-                #                continue
-                #            child_props = node_properties[children[j][1]]
-                #            state_c += child_props['states'][dependency][i]['c']
-                #            state_h += child_props['states'][dependency][i]['h']
-
-                #        feed_dict[state['c']] = state_c / props['num_children']
-                #        feed_dict[state['h']] = state_h / props['num_children']
-                #    else:
-                #        feed_dict[state['c']] = initial_states[dependency][i].c
-                #        feed_dict[state['h']] = initial_states[dependency][i].h
-                #else:
-                if True:
-                    dependency_node = props['dependencies'][dependency]
-                    # the second condition checks for the reverse dependencies while traveling
-                    # in the forward direction
-                    if dependency_node is not None and 'states' in node_properties[dependency_node]:
-                        dependency_props = node_properties[dependency_node]
+            for i in range(config['num_layers']):
+                state = config['feed']['states'][dependency][i]
+                output = config['feed']['outputs'][dependency][i]
+                dependency_node = props['dependencies'][dependency] if dependency != 'children' else node
+                # the second condition checks for the reverse dependencies while traveling
+                # in the forward direction
+                if dependency_node is not None:
+                    dependency_props = node_properties[dependency_node]
+                    if 'states' in dependency_props and dependency in dependency_props['states'] \
+                                                    and i in dependency_props['states'][dependency]:
                         feed_dict[state['c']] = dependency_props['states'][dependency][i]['c']
                         feed_dict[state['h']] = dependency_props['states'][dependency][i]['h']
+                    else:
+                        feed_dict[state['c']] = initial['states'][dependency][i].c
+                        feed_dict[state['h']] = initial['states'][dependency][i].h
+                    if 'outputs' in dependency_props and dependency in dependency_props['outputs'] \
+                                                    and i in dependency_props['outputs'][dependency]:
                         feed_dict[output] = dependency_props['outputs'][dependency][i]
                     else:
-                        feed_dict[state['c']] = initial_states[dependency][i].c
-                        feed_dict[state['h']] = initial_states[dependency][i].h
-                        feed_dict[output] = initial_outputs[dependency][i]
+                        feed_dict[output] = initial['outputs'][dependency][i]
 
-            #if dependency == 'children':
-            #    if props['num_children'] == 0:
-            #        feed_dict[config['feed']['initial_output']] = initial_output
-            #    else:
-            #        output = 0
-            #        for i in range(len(children)):
-            #            if children[i][1] not in node_properties:
-            #                continue
-            #            output += node_properties[children[i][1]]['children_output']
-            #        feed_dict[config['feed']['initial_output']] = output / props['num_children']
+                if dependency == 'children':
+                    if 'children_tmp_states' in props and i in props['children_tmp_states']:
+                        feed_dict[config['feed']['children_tmp_states'][i]['c']] = props['children_tmp_states'][i]['c']
+                        feed_dict[config['feed']['children_tmp_states'][i]['h']] = props['children_tmp_states'][i]['h']
+                    else:
+                        # this doesn't really do anything?
+                        feed_dict[config['feed']['children_tmp_states'][i]['c']] = initial['children_tmp_states'][i].c
+                        feed_dict[config['feed']['children_tmp_states'][i]['h']] = initial['children_tmp_states'][i].h
 
+                    if 'children_predictor_states' in props and i in props['children_predictor_states']:
+                        feed_dict[config['feed']['children_predictor_states'][i]['c']] = \
+                                props['children_predictor_states'][i]['c']
+                        feed_dict[config['feed']['children_predictor_states'][i]['h']] = \
+                                props['children_predictor_states'][i]['h']
+                    else:
+                        feed_dict[config['feed']['children_predictor_states'][i]['c']] = \
+                                initial['children_predictor_states'][i].c
+                        feed_dict[config['feed']['children_predictor_states'][i]['h']] = \
+                                initial['children_predictor_states'][i].h
+
+            if dependency == 'children':
+                if 'children_predictor_output' in props:
+                    feed_dict[config['feed']['children_predictor_output']] = props['children_predictor_output']
+                else:
+                    feed_dict[config['feed']['children_predictor_output']] = initial['children_predictor_output']
+
+        # TODO: this seems to run through the entire while loop each time, despite the fact that
+        # we only want to do one layer at a time. Oh, that might actually be because
+        # "dependency_outputs[i][layer-1].read(ctr)" requires processing earlier layers. But why do later ones
+        # run for earlier layers, then??
         vals = session.run(fetches, feed_dict)
 
-        if direction == 'reverse' or len(directions) == 1:
+        if 'states' not in props:
+            props['states'] = {}
+        if 'outputs' not in props:
+            props['outputs'] = {}
+
+        props['outputs'].update(vals['outputs'])
+
+        if 'children' in config['dependencies'] and direction == 'reverse':
+            if props['dependencies']['left_sibling'] is not None:
+                sibling_props = node_properties[props['dependencies']['left_sibling']]
+                if 'children_tmp_states' not in sibling_props:
+                    sibling_props['children_tmp_states'] = {}
+                sibling_props['children_tmp_states'].update(vals['children_tmp_states'])
+                if is_last_layer:
+                    sibling_props['children_predictor_states'] = vals['children_predictor_states']
+            elif props['dependencies']['parent'] is not None:
+                parent_props = node_properties[props['dependencies']['parent']]
+                if is_last_layer:
+                    parent_props['children_predictor_output'] = vals['children_output']
+                if 'states' not in parent_props:
+                    parent_props['states'] = {}
+                if 'children' not in parent_props['states']:
+                    parent_props['states']['children'] = {}
+                parent_props['states']['children'].update(vals['states']['children'])
+                del(vals['states']['children'])
+        props['states'].update(vals['states'])
+
+        if include_cost:
             props['probabilities'] = probabilities = vals['label_probabilities'][0]
             expected_id = np.argmax(probabilities)
             props['expected'] = raw_data['id_to_token'][expected_id]
@@ -273,27 +328,19 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial_st
             props['p_a'] = feed_dict[config['placeholders']['data']['last_sibling']][1]
             props['p_f'] = vals['predicted_p_first']
 
-        if 'states' not in props:
-            props['states'] = {}
-            props['outputs'] = {}
-        props['states'].update(vals['states'])
-        props['outputs'].update(vals['outputs'])
-
-        if 'children' in config['dependencies']:
-            props['children_output'] = vals['children_output']
-
-        cost = vals['cost']
+            cost += vals['cost']
 
         if direction == 'forward':
             children = node.children()
             for i in range(len(children)):
-                cost += visit_tree(children[i][1], direction)
+                cost += visit_tree(children[i][1], direction, layer)
 
         return cost
 
     for i in range(len(directions)):
-        # only care about cost on the reverse trip?
-        cost = visit_tree(ast, directions[i])
+        for j in range(config['num_layers']):
+            # only care about cost on the reverse trip?
+            cost = visit_tree(ast, directions[i], j)
     print(cost)
 
 
@@ -368,8 +415,12 @@ def main(_):
 
             #initial_output = session.run([config['feed']['initial_output']])[0] if 'children' in config['dependencies'] else 0
 
-            initial_states = {}
-            initial_outputs = {}
+            initial = {
+                'states': {},
+                'outputs': {},
+                'children_predictor_states': [],
+                'children_tmp_states': []
+            }
 
             feed_dict = {
                 config['placeholders']['is_inference']: True
@@ -380,19 +431,26 @@ def main(_):
                 feed_dict[config['placeholders']['inference'][k]['attr']] = 0
             for k in config['placeholders']['data']:
                 feed_dict[config['placeholders']['data'][k]] = [0]
-            feed_dict[config['placeholders']['inference']['self']['label']] = 0
-            feed_dict[config['placeholders']['inference']['self']['attr']] = 0
 
-
-            for k in config['feed']['initial_states']:
-                initial_states[k] = []
-                initial_outputs[k] = []
-                for i in range(len(config['feed']['initial_states'][k])):
-                    c, h = session.run([config['feed']['initial_states'][k][i]['c'],
-                                        config['feed']['initial_states'][k][i]['h']])
+            for k in config['feed']['states']:
+                initial['states'][k] = []
+                initial['outputs'][k] = []
+                for i in range(config['num_layers']):
+                    c, h = session.run([config['feed']['states'][k][i]['c'],
+                                        config['feed']['states'][k][i]['h']])
                     # don't really need to wrap this up in an LSTM tuple
-                    initial_states[k].append(tf.contrib.rnn.LSTMStateTuple(c, h))
-                    initial_outputs[k].append(session.run([config['feed']['initial_outputs'][k][i]], feed_dict)[0])
+                    initial['states'][k].append(tf.contrib.rnn.LSTMStateTuple(c, h))
+                    initial['outputs'][k].append(session.run([config['feed']['outputs'][k][i]], feed_dict)[0])
+            for i in range(config['num_layers']):
+                c, h = session.run([config['feed']['children_predictor_states'][i]['c'],
+                                    config['feed']['children_predictor_states'][i]['h']])
+                initial['children_predictor_states'].append(tf.contrib.rnn.LSTMStateTuple(c, h))
+                c, h = session.run([config['feed']['children_tmp_states'][i]['c'],
+                                    config['feed']['children_tmp_states'][i]['h']])
+                initial['children_tmp_states'].append(tf.contrib.rnn.LSTMStateTuple(c, h))
+            initial['children_predictor_output'] = session.run([config['feed']['children_predictor_output']], feed_dict)[0]
+            initial['leaf_input'] = session.run([config['feed']['leaf_input']], feed_dict)[0]
+
 
             parser = c_parser.CParser()
             while True:
@@ -415,7 +473,7 @@ def main(_):
                     # extend objects
                     node_properties = {}
                     ret = dump_ast.linearize_ast(ast, node_properties=node_properties) # XXX how slow is this?
-                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial_states, initial_outputs)
+                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial)
                     code = "blah"#search(ast, node_properties, filename, directives)
                     output = {
                         'ast': print_ast(ast, node_properties),

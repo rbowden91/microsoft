@@ -1,6 +1,13 @@
 # Largely based on Tree-Structured Decoding with Doublyrecurrent Neural Networks
 # (https://openreview.net/pdf?id=HkYhZDqxg)
 
+# TODO (potential):
+# * Could eventually do something with attention over the children (for the separate RNN that predicts the parent)
+# * Have a decoder for the above RNN, or just give the output directly from this RNN to h_pred?
+# * Attention over all the U_dependencies?
+# * Include placement of node within tree
+# * Some way of incorporating the Child RNN into the TreeRNN so that arbitrary children can appear?
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -8,6 +15,7 @@ from __future__ import print_function
 import inspect
 import time
 import json
+from pprint import pprint
 import os
 
 import numpy as np
@@ -95,80 +103,65 @@ TestConfig = {
   "batch_size" : 20,
 }
 
+def data_type():
+    return tf.float16 if FLAGS.use_fp16 else tf.float32
+
+# store the LSTM state in a TensorArray
+def save_lstm_state(state_array, state, position):
+    # c is in position 0, h is in position 1
+    return [state_array[0].write(position, state.c),
+            state_array[1].write(position, state.h)]
+
 # store the LSTM state in a TensorArray
 def save_multi_lstm_state(state_array, state, position):
     copy = []
     for i, (c, h) in enumerate(state):
-        copy.append([])
-        # c is in position 0, h is in position 1
-        copy[i].append(state_array[i][0].write(position, state[i].c))
-        copy[i].append(state_array[i][1].write(position, state[i].h))
+        copy.append(save_lstm_state(state_array[i], state[i], position))
     return copy
 
 # reconstruct the LSTM state from a TensorArray
 # initial_state is needed to use as a template for restoration
-def restore_multi_lstm_state(state_array, initial_state, position, division_scalar=None, add_state=None):
-    state = []
-    for i, (c, h) in enumerate(initial_state):
-        c_state = state_array[i][0].read(position)
-        h_state = state_array[i][1].read(position)
-        if add_state is not None:
-            c_state += add_state[i].c
-            h_state += add_state[i].h
-        elif division_scalar is not None:
-            c_state /= division_scalar
-            h_state /= division_scalar
-
-        # TensorArray returns shape <unknown>, which breaks things when passed to LSTM cell()
-        c_state.set_shape(initial_state[i].c.shape)
-        h_state.set_shape(initial_state[i].h.shape)
-
-        state.append(tf.contrib.rnn.LSTMStateTuple(c_state, h_state))
-
-    return tuple(state)
-
-# initialize an array of TensorArrays to store an LSTM, based on the initial_state template
-# XXX don't we know how big the tensor array will need to be?
-def initialize_lstm_array(initial_state):
-    states = []
-    for i, (c, h) in enumerate(initial_state):
-        states.append([])
-        for k in [c, h]:
-            states[i].append(tf.TensorArray(
-                tf.float32,
-                size=0,
-                dynamic_size=True,
-                clear_after_read=False,
-                infer_shape=False))
-    return states
-
-# store the LSTM state in a TensorArray
-def save_lstm_state(state_array, state, position):
-    return [state_array[0].write(position, state.c),
-            state_array[1].write(position, state.h)]
-
-# reconstruct the LSTM state from a TensorArray
-# initial_state is needed to use as a template for restoration
-def restore_lstm_state(state_array, initial_state, position, add_state=None):
+def restore_lstm_state(state_array, position, add_state=None):
     c = state_array[0].read(position)
-    c.set_shape(initial_state.c.shape)
     h = state_array[1].read(position)
-    h.set_shape(initial_state.h.shape)
     if add_state is not None:
         c += add_state.c
         h += add_state.h
 
     return tf.contrib.rnn.LSTMStateTuple(c, h)
 
+def restore_multi_lstm_state(state_array, num_layers, position):
+    state = []
+    for i in range(num_layers):
+        state.append(restore_lstm_state(state_array[i], position))
+    return tuple(state)
 
-def data_type():
-  return tf.float16 if FLAGS.use_fp16 else tf.float32
+def init_tensor_array(total_data, hidden_size):
+    return tf.TensorArray(
+                data_type(),
+                size=total_data,
+                dynamic_size=False,
+                clear_after_read=False,
+                infer_shape=True,
+                element_shape=[1, hidden_size])
+
+# initialize an array of TensorArrays to store an LSTM
+def init_lstm_array(num_layers, total_data, hidden_size):
+    states = []
+    for i in range(num_layers):
+        states.append([])
+        # 1 for c, 1 for h
+        for k in range(2):
+            states[i].append(init_tensor_array(total_data, hidden_size))
+    return states
+
+
 
 # we no longer store (c,h), but rather, "c" is the part of the memory cell already past through the forget gate
-class TreeLSTMCell(tf.contrib.rnn.RNNCell):
+class TreeLSTMCell():
 
     def __init__(self, num_units, forget_bias=1.0, input_size=None, activation=tf.tanh, reuse=None):
-        super(TreeLSTMCell, self).__init__(_reuse=reuse)
+        #super(TreeLSTMCell, self).__init__(_reuse=reuse)
         self._num_units = num_units
         self._forget_bias = forget_bias
         self._activation = activation
@@ -191,6 +184,10 @@ class TreeLSTMCell(tf.contrib.rnn.RNNCell):
         self.W_u = tf.get_variable("W_u", [num_units, num_units], dtype=data_type())
         self.U_u = tf.get_variable("U_u", [num_units, num_units], dtype=data_type())
         self.b_u = tf.get_variable("b_u", [1, num_units], dtype=data_type())
+
+    def zero_state(self, batch_size, data_type):
+        return tf.contrib.rnn.LSTMStateTuple(tf.zeros([batch_size, self._num_units], dtype=data_type),
+                tf.zeros([batch_size, self._num_units], dtype=data_type))
 
     @property
     def state_size(self):
@@ -225,90 +222,28 @@ class TreeLSTMCell(tf.contrib.rnn.RNNCell):
 
 class TRNNModel(object):
 
-  def __init__(self, is_training, config):
-    self.size = size = config['hidden_size']
-    self.label_size = label_size = config['label_vocab_size']
-    self.attr_size = attr_size = config['attr_vocab_size']
-    self.dependencies = config['dependencies']
-    num_layers = config['num_layers']
+    def embed(self, index, dependency):
+        with tf.variable_scope('Parameters', reuse=True):
+            with tf.device("/cpu:0"):
+                label_embedding = tf.get_variable(
+                    "label_embedding", [self.label_size, self.size], dtype=data_type())
+                # XXX currently not using this!!
+                attr_embedding = tf.get_variable(
+                    "attr_embedding", [self.attr_size, self.size / 2], dtype=data_type())
 
-    # declare a bunch of parameters that will be reused later
-    with tf.variable_scope('Parameters'):
-        # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
-        for dependency in self.dependencies:
-            tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
-
-        tf.get_variable('u_last', [size], dtype=tf.float32)
-        tf.get_variable('u_first', [size], dtype=tf.float32)
-
-        tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
-        tf.get_variable("attr_b", [attr_size], dtype=data_type())
-        tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
-
-        tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
-        tf.get_variable("softmax_b", [label_size], dtype=data_type())
-
-        tf.get_variable("v_first", [label_size], dtype=data_type())
-        tf.get_variable("v_last", [label_size], dtype=data_type())
-
-    with tf.device("/cpu:0"):
-      label_embedding = tf.get_variable(
-          "label_embedding", [label_size, size ], dtype=data_type())
-      attr_embedding = tf.get_variable(
-          "attr_embedding", [attr_size, size / 2], dtype=data_type())
-
-    def lstm_cell(dependency):
-        if dependency == 'children':
-            return TreeLSTMCell(size, forget_bias=0.0, reuse=tf.get_variable_scope().reuse)
+        if dependency == None:
+            label_index = 0
+            attr_index = 0
         else:
-            return tf.contrib.rnn.BasicLSTMCell(
-                size, forget_bias=0.0, state_is_tuple=True,
-                reuse=tf.get_variable_scope().reuse)
-    attn_cell = lstm_cell
-    if is_training and config['keep_prob'] < 1:
-      def attn_cell(dependency):
-        return tf.contrib.rnn.DropoutWrapper(
-            lstm_cell(dependency), output_keep_prob=config['keep_prob'])
+            label_index = tf.cond(self.placeholders['is_inference'],
+                                  lambda: self.placeholders['inference'][dependency]['label'],
+                                  lambda: tf.gather(self.placeholders['data']['label_index'], index,
+                                      name="LabelIndexGather"))
 
-    self.placeholders = { 'data': {}, 'inference': {} }
-    for k in config['placeholders']['data']:
-        self.placeholders['data'][k] = tf.placeholder(tf.int32, [None], name=k+'_placeholder')
-
-    # XXX XXX XXX better way of doing this? Basically, when doing inference, we want to be able to have different nodes
-    # for each dependency, but we only use the Initial States as a place to write, which all are
-    # associated with node 0
-
-    self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
-    for k in possible_dependencies:
-        self.placeholders['inference'][k] = {
-            'attr' : tf.placeholder(tf.int32, [], name='inference_' + k + '_attr_placeholder'),
-            'label' : tf.placeholder(tf.int32, [], name='inference_' + k + '_label_placeholder')
-        }
-    self.placeholders['inference']['self'] = {
-        'attr' : tf.placeholder(tf.int32, [], name='inference_self_attr_placeholder'),
-        'label' : tf.placeholder(tf.int32, [], name='inference_self_label_placeholder')
-    }
-
-    self.dependency_initial_states = dict()
-    self.dependency_initial_outputs = dict()
-    self.dependency_cells = dict()
-
-    # dependency_states can't be a dictionary on sibling/parent, since it needs to be convertible to a tensor (required
-    # for the tf.while_loop). The first index in dependency_states is thus aligned with the dependency in the
-    # dependencies array
-    dependency_states = []
-    dependency_outputs = []
-
-    def embed(index, dependency):
-        label_index = tf.cond(self.placeholders['is_inference'],
-                              lambda: self.placeholders['inference'][dependency]['label'],
-                              lambda: tf.gather(self.placeholders['data']['label_index'], index,
-                                  name="LabelIndexGather"))
-
-        attr_index = tf.cond(self.placeholders['is_inference'],
-                              lambda: self.placeholders['inference'][dependency]['attr'],
-                              lambda: tf.gather(self.placeholders['data']['attr_index'], index,
-                                  name="AttrIndexGather"))
+            attr_index = tf.cond(self.placeholders['is_inference'],
+                                  lambda: self.placeholders['inference'][dependency]['attr'],
+                                  lambda: tf.gather(self.placeholders['data']['attr_index'], index,
+                                      name="AttrIndexGather"))
         node_label_embedding = tf.gather(label_embedding, label_index,
                                             name="LabelEmbedGather")
         node_attr_embedding = tf.gather(attr_embedding, attr_index,
@@ -316,472 +251,550 @@ class TRNNModel(object):
         node_embedding = node_label_embedding#tf.concat([node_label_embedding, node_attr_embedding], 0)
         return tf.expand_dims(node_embedding, 0)
 
-    for i in range(len(self.dependencies)):
-        dependency = self.dependencies[i]
+    def __init__(self, is_training, config):
+        self.size = size = config['hidden_size']
+        self.label_size = label_size = config['label_vocab_size']
+        self.attr_size = attr_size = config['attr_vocab_size']
+        self.dependencies = config['dependencies']
+        num_layers = config['num_layers']
 
-        # XXX best I can tell, there is a tensorflow bug that causes basic_lstm_cell/basic_lstm_cell_1 issues...
-        self.dependency_cells[dependency] = []
-        self.dependency_initial_states[dependency] = []
-        self.dependency_initial_outputs[dependency] = []
-        for j in range(num_layers):
-            with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j)):
-                self.dependency_cells[dependency].append(attn_cell(dependency))
-                self.dependency_initial_states[dependency].append(self.dependency_cells[dependency][j].zero_state(1, data_type()))
+        # declare a bunch of parameters that will be reused later
+        with tf.variable_scope('Parameters'):
+            # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
+            for dependency in self.dependencies:
+                tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
 
-        # Need to manually handle LSTM states. This is gross.
-        dependency_states.append(initialize_lstm_array(self.dependency_initial_states[dependency]))
-        dependency_outputs.append([])
-        for j in range(num_layers):
-            dependency_outputs[-1].append(tf.TensorArray(
-                tf.float32,
-                size=0,
-                dynamic_size=True,
-                clear_after_read=False,
-                infer_shape=False))
+            tf.get_variable('u_last', [size], dtype=tf.float32)
+            tf.get_variable('u_first', [size], dtype=tf.float32)
 
-        # since we only use the TensorArray below, write the initial state in position 0. children needs to write
-        # final output there, though
-        if self.dependencies[i] != 'children':
-            cur_input = embed(0, self.dependencies[i])
+            tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
+            tf.get_variable("attr_b", [attr_size], dtype=data_type())
+            tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
+
+            tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
+            tf.get_variable("softmax_b", [label_size], dtype=data_type())
+
+            tf.get_variable("v_first", [label_size], dtype=data_type())
+            tf.get_variable("v_last", [label_size], dtype=data_type())
+
+            with tf.device("/cpu:0"):
+                tf.get_variable("label_embedding", [self.label_size, self.size], dtype=data_type())
+                # XXX currently not using this!!
+                tf.get_variable("attr_embedding", [self.attr_size, self.size / 2], dtype=data_type())
+
+        def lstm_cell(is_tree):
+            if is_tree:
+                return TreeLSTMCell(size, forget_bias=0.0, reuse=tf.get_variable_scope().reuse)
+            else:
+                return tf.contrib.rnn.BasicLSTMCell(
+                    size, forget_bias=0.0, state_is_tuple=True,
+                    reuse=tf.get_variable_scope().reuse)
+        attn_cell = lstm_cell
+        if is_training and config['keep_prob'] < 1:
+          def attn_cell(is_tree):
+            return tf.contrib.rnn.DropoutWrapper(
+                lstm_cell(is_tree), output_keep_prob=config['keep_prob'])
+
+        self.placeholders = { 'data': {}, 'inference': {} }
+        for k in config['placeholders']['data']:
+            self.placeholders['data'][k] = tf.placeholder(tf.int32, [None], name=k+'_placeholder')
+
+        # XXX XXX XXX better way of doing this? Basically, when doing inference, we want to be able to have different nodes
+        # for each dependency, but we only use the Initial States as a place to write, which all are
+        # associated with node 0
+
+        self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
+        for k in possible_dependencies:
+            self.placeholders['inference'][k] = {
+                'attr' : tf.placeholder(tf.int32, [], name='inference_' + k + '_attr_placeholder'),
+                'label' : tf.placeholder(tf.int32, [], name='inference_' + k + '_label_placeholder')
+            }
+        self.placeholders['inference']['self'] = {
+            'attr' : tf.placeholder(tf.int32, [], name='inference_self_attr_placeholder'),
+            'label' : tf.placeholder(tf.int32, [], name='inference_self_label_placeholder')
+        }
+
+        total_data = tf.squeeze(tf.shape(self.placeholders['data']['is_leaf']))
+
+        self.dependency_initial_states = dict()
+        self.dependency_initial_outputs = dict()
+        self.dependency_cells = dict()
+
+        # dependency_states can't be a dictionary on sibling/parent, since it needs to be convertible to a tensor (required
+        # for the tf.while_loop). The first index in dependency_states is thus aligned with the dependency in the
+        # dependencies array
+        dependency_states = []
+        dependency_outputs = []
+
+
+        for i in range(len(self.dependencies)):
+            dependency = self.dependencies[i]
+
+            self.dependency_cells[dependency] = []
+            self.dependency_initial_states[dependency] = []
+            self.dependency_initial_outputs[dependency] = []
             for j in range(num_layers):
+                with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j)):
+                    self.dependency_cells[dependency].append(attn_cell(dependency == 'children'))
+                    self.dependency_initial_states[dependency].append(self.dependency_cells[dependency][j].zero_state(1, data_type()))
+
+            # Need to manually handle LSTM states. This is gross.
+            dependency_states.append(init_lstm_array(num_layers, total_data, size))
+            dependency_outputs.append([])
+            for j in range(num_layers):
+                dependency_outputs[-1].append(init_tensor_array(total_data, size))
+
+            # since we only use the TensorArray below, write the initial state in position 0. children needs to write
+            # final output there, though
+            self.initial_leaf_input = self.embed(0, self.dependencies[i])
+            cur_input = self.initial_leaf_input
+            for j in range(num_layers):
+                # the second cur_input doesn't do anything -- it's just to get the output from the TreeLSTM
+                # XXX could this one (for leaves) just be a regular LSTM instead of a TreeLSTM?
+                cur_input = cur_input if dependency != 'children' else tf.stack([cur_input, cur_input])
+                # need to use tf.AUTO_REUSE, since the first time we call an LSTM cell it uses new variables
                 with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j), reuse=tf.AUTO_REUSE):
                     (cur_input, next_state) = self.dependency_cells[dependency][j](cur_input,
-                                                                                   self.dependency_initial_states[dependency][j])
+                                                    self.dependency_initial_states[dependency][j])
+                self.dependency_initial_outputs[dependency].append(cur_input)
+                dependency_outputs[i][j] = dependency_outputs[i][j].write(0,
+                                                self.dependency_initial_outputs[dependency][j])
+                if dependency != 'children':
                     dependency_states[i][j] = save_lstm_state(dependency_states[i][j],
-                                                               self.dependency_initial_states[dependency][j], 0)
-                    
-                    self.dependency_initial_outputs[dependency].append(cur_input)
-                    dependency_outputs[i][j] = dependency_outputs[i][j].write(0,
-                                                    self.dependency_initial_outputs[dependency][j])
+                                                                self.dependency_initial_states[dependency][j], 0)
+        # extra TensorArrays for children, hurray!!
+        children_predictor_states = init_lstm_array(num_layers, total_data, size)
+        children_tmp_states = init_lstm_array(num_layers, total_data, size)
+        children_output = init_tensor_array(total_data, size)
 
+        self.initial_children_tmp_states = []
 
-
-    if 'children' in self.dependencies:
         # separate RNN just to predict a parent label given children embedding sequence
-        with tf.variable_scope("Children_RNN"):
-            # XXX hackish way to get a basic lstm cell
-            self.children_predictor = \
-                    tf.contrib.rnn.MultiRNNCell([attn_cell('parent') for i in range(num_layers)], state_is_tuple=True)
-            # same tensorflow bug as above... have to actually call it (since we only use one multirnn, shouldn't need
-            # to do anything with scoping)
-            self.children_predictor(tf.zeros([1, size]), self.children_predictor.zero_state(1, data_type()))
-
-        children_predictor_states = initialize_lstm_array(self.children_predictor.zero_state(1, data_type()))
+        with tf.variable_scope("Children_RNN", reuse=tf.AUTO_REUSE):
+            self.children_predictor = tf.contrib.rnn.MultiRNNCell(
+                    [attn_cell(False) for i in range(num_layers)], state_is_tuple=True)
 
         # TODO: split embedding size from hidden layer size
         # XXX Is this right?
+        self.children_predictor_initial_states = self.children_predictor.zero_state(1, data_type())
         children_predictor_states = save_multi_lstm_state(children_predictor_states,
-                                                          self.children_predictor.zero_state(1, data_type()), 0)
-
-        # extra stuff needed by the children dependency
-        # 0 is the <nil> token
-        initial_embedding = embed(0, 'children')
-
-
-        cur_input = initial_embedding
-        for i in range(num_layers):
-            child_idx = self.dependencies.index('children')
-            # the second cur_input doesn't do anything -- it's just to get the output from the TreeLSTM
-            # XXX could this one just be a regular LSTM instead of a TreeLSTM?
-            with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j), reuse=True):
-                (output, new_state) = self.dependency_cells['children'][i](
-                        tf.stack([cur_input, cur_input]), self.dependency_initial_states['children'][i])
-            # XXX XXX XXX parent needs to write here? idk... ugh
-            #dependency_states[child_idx][i] = save_lstm_state(dependency_states[child_idx][i], new_state, 0)
-            dependency_outputs[child_idx][i] = dependency_outputs[child_idx][i].write(0, output)
-            cur_input = output
-
-        # extra TensorArrays for children, hurray!!
-        children_tmp_states = initialize_lstm_array(self.dependency_initial_states['children'])
-        children_output = tf.TensorArray(
-            tf.float32,
-            size=0,
-            dynamic_size=True,
-            clear_after_read=False,
-            infer_shape=False)
-    else:
-        children_tmp_states = 0
-        children_output = 0
-        children_predictor_states = 0
-
-    # TODO: dropout??
-    #if is_training and config['keep_prob'] < 1:
-    #  inputs = tf.nn.dropout(inputs, config['keep_prob'])
-
-    # this returns true as long as the loop counter is less than the length of the example
-    total_data = tf.squeeze(tf.shape(self.placeholders['data']['is_leaf']))
-    def loop_cond_wrapper(direction):
-        def loop_cond (loss, ctr, h_pred, dependency_states, dependency_outputs,
-                       children_tmp_states, children_output, children_predictor_states,
-                       label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
-            if direction == 'forward':
-                return tf.less(ctr, total_data)
-            else:
-                return tf.greater(ctr, 0)
-        return loop_cond
-
-    def loop_body_wrapper(direction, do_loss, layer):
-        def loop_body(loss, ctr, h_pred, dependency_states, dependency_outputs,
-                      children_tmp_states, children_output, children_predictor_states,
-                      label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
-
-            # to be accurate
-            is_leaf = tf.cast(tf.gather(self.placeholders['data']['is_leaf'], ctr, name="IsLeafGather"), tf.float32)
-            first_sibling = tf.cast(tf.gather(self.placeholders['data']['first_sibling'], ctr), tf.float32)
-            last_sibling = tf.cast(tf.gather(self.placeholders['data']['last_sibling'], ctr, name="LastSiblingGather"), tf.float32)
-            label_index = tf.gather(self.placeholders['data']['label_index'], ctr, name="NodeIndexGather")
-            attr_index = tf.gather(self.placeholders['data']['attr_index'], ctr, name="AttrIndexGather")
-            parent = tf.gather(self.placeholders['data']['parent'], ctr)
-            left_sibling = tf.gather(self.placeholders['data']['left_sibling'], ctr)
-            right_sibling = tf.gather(self.placeholders['data']['right_sibling'], ctr)
-            num_children = tf.cast(tf.gather(self.placeholders['data']['num_children'], ctr,
-                                             name="AttrIndexGather"), tf.float32)
-            h_pred_ctr = tf.squeeze(tf.gather(h_pred, [ctr]))
+                                                          self.children_predictor_initial_states, 0)
+        if 'children' in self.dependencies:
+            for j in range(num_layers):
+                self.initial_children_tmp_states.append(self.dependency_cells['children'][j].zero_state(1, data_type()))
+            (init_output, next_state) = self.children_predictor(self.dependency_initial_outputs['children'][num_layers-1],
+                                        self.children_predictor_initial_states)
+            self.initial_children_predictor_output = init_output
+        else:
+            for j in range(num_layers):
+                self.initial_children_tmp_states.append(self.dependency_cells[self.dependencies[0]][j].zero_state(1, data_type()))
+            self.initial_children_predictor_output = tf.constant(0)
 
 
 
 
-            # Generate both the sibling and parent RNN states for the current node, based on the previous sibling and parent
-            for i in range(len(self.dependencies)):
-                dependency = self.dependencies[i]
-                if possible_dependencies[dependency] != direction:
-                    continue
-                # During inference, we want to use the directly-supplied label for the parent, since each node is passed in
-                # one-by-one and we won't have access to the parent when the child is passed in. During training, we have
-                # all nodes in the example at once, so can directly grab the parent's label
-                dependency_node = tf.cond(self.placeholders['is_inference'],
-                                          lambda: 0,
-                                          lambda: tf.gather(self.placeholders['data'][dependency], ctr,
-                                              name=(dependency+"Gather")) if dependency != 'children' else None)
+        # TODO: dropout??
+        #if is_training and config['keep_prob'] < 1:
+        #  inputs = tf.nn.dropout(inputs, config['keep_prob'])
 
-                node_embedding = embed(ctr, 'self')
-
-
-                if layer == 0:
-                    inp = node_embedding
+        # this returns true as long as the loop counter is less than the length of the example
+        def loop_cond_wrapper(direction):
+            def loop_cond (loss, ctr, h_pred, dependency_states, dependency_outputs,
+                           children_tmp_states, children_output, children_predictor_states,
+                           label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
+                if direction == 'forward':
+                    return tf.less(ctr, total_data)
                 else:
-                    old_output = dependency_outputs[i][layer-1].read(ctr)
-                    old_output.set_shape([1, size])
-                    inp = old_output
+                    return tf.greater(ctr, 0)
+            return loop_cond
 
-                if dependency != 'children':
-                    # reconstruct the LSTM state of the parent/sibling from the TensorArray
-                    state = restore_lstm_state(dependency_states[i][layer],
-                                                self.dependency_initial_states[dependency][layer],
-                                                dependency_node)
+        def loop_body_wrapper(direction, do_loss, layer):
+            def loop_body(loss, ctr, h_pred, dependency_states, dependency_outputs,
+                          children_tmp_states, children_output, children_predictor_states,
+                          label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
 
-                    with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer)):
-                        (output, new_state) = self.dependency_cells[dependency][layer](inp, state)
+                is_leaf = tf.cast(tf.gather(self.placeholders['data']['is_leaf'], ctr, name="IsLeafGather"), tf.float32)
+                first_sibling = tf.cast(tf.gather(self.placeholders['data']['first_sibling'], ctr), tf.float32)
+                last_sibling = tf.cast(tf.gather(self.placeholders['data']['last_sibling'], ctr, name="LastSiblingGather"), tf.float32)
+                label_index = tf.gather(self.placeholders['data']['label_index'], ctr, name="NodeIndexGather")
+                attr_index = tf.gather(self.placeholders['data']['attr_index'], ctr, name="AttrIndexGather")
+                parent = tf.gather(self.placeholders['data']['parent'], ctr)
+                left_sibling = tf.gather(self.placeholders['data']['left_sibling'], ctr)
+                right_sibling = tf.gather(self.placeholders['data']['right_sibling'], ctr)
+                #num_children = tf.cast(tf.gather(self.placeholders['data']['num_children'], ctr,
+                #                                 name="AttrIndexGather"), tf.float32)
+                h_pred_ctr = tf.squeeze(tf.gather(h_pred, [ctr]))
 
-                    dependency_states[i][layer] = save_lstm_state(dependency_states[i][layer], new_state, ctr)
-                    dependency_outputs[i][layer] = dependency_outputs[i][layer].write(ctr, output)
+                # Generate both the sibling and parent RNN states for the current node, based on the previous sibling and parent
+                for i in range(len(self.dependencies)):
+                    dependency = self.dependencies[i]
+                    if possible_dependencies[dependency] != direction:
+                        continue
+                    # During inference, we want to use the directly-supplied label for the parent, since each node is passed in
+                    # one-by-one and we won't have access to the parent when the child is passed in. During training, we have
+                    # all nodes in the example at once, so can directly grab the parent's label
+                    dependency_node = tf.cond(self.placeholders['is_inference'],
+                                              lambda: 0,
+                                              lambda: tf.gather(self.placeholders['data'][dependency], ctr,
+                                                  name=(dependency+"Gather")) if dependency != 'children' else 0)
 
-                else:
-                    # TODO: could eventually do something with attention over the children?
-                    # TODO: have a decoder, or just give the output directly from this RNN to h_pred?
+                    node_embedding = self.embed(ctr, 'self')
+
                     if layer == 0:
-                        leaf_embedding = initial_embedding
+                        inp = node_embedding
                     else:
-                        leaf_embedding = dependency_outputs[i][layer-1].read(0)
-                        leaf_embedding.set_shape([1, size])
+                        old_output = dependency_outputs[i][layer-1].read(ctr)
+                        inp = old_output
 
-                    # XXX XXX XXX XXX XXX fix tf.zeros here
-                    bootstrap_leaf = lambda: \
-                        (self.dependency_cells['children'][layer](
-                            tf.stack([leaf_embedding, inp]),
-                            self.dependency_initial_states['children'][layer])[1],
-                         children_output if layer != num_layers - 1 else \
-                            children_output.write(ctr, tf.zeros([1,size])))
+                    if dependency != 'children':
+                        # reconstruct the LSTM state of the parent/sibling from the TensorArray
+                        state = restore_lstm_state(dependency_states[i][layer], dependency_node)
 
-                    bootstrap_else = lambda: \
-                        (restore_lstm_state(dependency_states[i][layer],
-                                            self.dependency_initial_states[dependency][layer], ctr),
-                         children_output)
+                        with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer)):
+                            (output, new_state) = self.dependency_cells[dependency][layer](inp, state)
 
-                    state, children_output = tf.cond(tf.cast(num_children, tf.bool), bootstrap_else,
-                                                bootstrap_leaf, strict=True)
+                        dependency_states[i][layer] = save_lstm_state(dependency_states[i][layer], new_state, ctr)
+                        dependency_outputs[i][layer] = dependency_outputs[i][layer].write(ctr, output)
 
-                    # XXX XXX this needs to be fixed for inference :-X
-                    if layer == 0:
-                        # XXX XXX XXX
-                        parent_embedding = embed(parent, 'XXX')
                     else:
-                        parent_embedding = dependency_outputs[i][layer-1].read(parent)
-                        parent_embedding.set_shape([1, size])
+                        def infer(index):
+                            return tf.cond(self.placeholders['is_inference'], lambda: 0, lambda: index)
 
-                    joint_embedding = tf.stack([inp, parent_embedding])
-                    with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer), reuse=True):
-                        (future_output, future_state) = self.dependency_cells['children'][layer](joint_embedding, state)
+                        if layer == 0:
+                            leaf_embedding = self.initial_leaf_input
+                            parent_embedding = self.embed(parent, 'parent')
+                        else:
+                            leaf_embedding = self.dependency_initial_outputs['children'][layer-1]
+                            parent_embedding = tf.cond(self.placeholders['is_inference'],
+                                    lambda: dependency_outputs[i][layer-1].read(infer(parent)),
+                                    lambda: dependency_outputs[i][layer-1].read(parent))
 
-                    if layer == num_layers-1:
-                        # for now, ignore output of all but last (could eventually use with attention)?
-                        cp_state = restore_multi_lstm_state(children_predictor_states,
-                                                            self.children_predictor.zero_state(1, data_type()),
-                                                            right_sibling)
-                        with tf.variable_scope("Children_RNN", reuse=True):
-                            (cp_output, next_cp_state) = self.children_predictor(future_output, cp_state)
-                        children_predictor_states = save_multi_lstm_state(children_predictor_states,
-                                                                          next_cp_state, ctr)
+                        bootstrap_leaf = lambda: \
+                            (self.dependency_cells['children'][layer](
+                                tf.stack([leaf_embedding, inp]),
+                                self.dependency_initial_states['children'][layer])[1],
+                             children_output if layer != num_layers - 1 else \
+                                children_output.write(ctr, self.initial_children_predictor_output))
 
-                        # XXX XXX something is wrong with cp_output name?
-                        handle_first = lambda: children_output.write(parent, cp_output)
-                        handle_not_first = lambda: children_output
+                        bootstrap_inference_else = lambda: (self.dependency_initial_states['children'][layer],
+                             children_output if layer != num_layers - 1 else \
+                                children_output.write(ctr, self.initial_children_predictor_output))
 
-                        children_output = tf.cond(tf.cast(left_sibling, tf.bool),
-                                                    handle_not_first,
-                                                    handle_first)
+                        bootstrap_training_else = lambda: (restore_lstm_state(dependency_states[i][layer], ctr),
+                                children_output)
+                        bootstrap_else = lambda: tf.cond(self.placeholders['is_inference'],
+                                                          bootstrap_inference_else,
+                                                          bootstrap_training_else)
+
+                        state, children_output = tf.cond(tf.cast(is_leaf, tf.bool), bootstrap_leaf,
+                                                         bootstrap_else, strict=True)
+
+                        joint_embedding = tf.stack([inp, parent_embedding])
+                        with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer), reuse=True):
+                            (future_output, future_state) = self.dependency_cells['children'][layer](joint_embedding,
+                                                                                                     state)
+                        if layer == num_layers-1:
+                            # for now, ignore output of all but last (could eventually use with attention)?
+                            cp_state = restore_multi_lstm_state(children_predictor_states, num_layers,
+                                                                infer(right_sibling))
+
+                            with tf.variable_scope("Children_RNN", reuse=True):
+                                (cp_output, next_cp_state) = self.children_predictor(future_output, cp_state)
+                            children_predictor_states = save_multi_lstm_state(children_predictor_states,
+                                                                              next_cp_state, ctr)
+
+                            # if we are the left-most sibling, write the output of the RNN to the parent
+                            handle_first = lambda: children_output.write(infer(parent), cp_output)
+                            handle_not_first = lambda: children_output
+                            children_output = tf.cond(tf.cast(left_sibling, tf.bool),
+                                                        handle_not_first,
+                                                        handle_first)
 
 
-                    # this is basically doing a +=. If we are the last sibling (on the right), we need to start
-                    # from 0. If we are the first sibling (on the left), we need to write the sum to the parent
-                    dependency_outputs[i][layer] = dependency_outputs[i][layer].write(ctr, future_output)
+                        # this is basically doing a +=. If we are the last sibling (on the right), we need to start
+                        # from 0. If we are the first sibling (on the left), we need to write the sum to the parent
+                        dependency_outputs[i][layer] = dependency_outputs[i][layer].write(ctr, future_output)
 
-                    # update state
-                    handle_last = lambda: future_state
-                    handle_not_last = lambda: \
-                            restore_lstm_state(children_tmp_states[layer],
-                                                self.dependency_initial_states[dependency][layer],
-                                                ctr, add_state=future_state)
+                        # update state
 
-                    new_state = tf.cond(tf.cast(right_sibling, tf.bool),
-                                        handle_not_last, handle_last, strict=True)
 
-                    # save to parent
-                    handle_first = lambda state: (children_tmp_states[layer],
-                                                    save_lstm_state(state, new_state, parent))
-                    # save to sibling
-                    handle_not_first = lambda state: (save_lstm_state(children_tmp_states[layer], new_state, left_sibling),
-                                                        state)
-                    children_tmp_states[layer], dependency_states[i][layer] = \
-                            tf.cond(tf.cast(left_sibling, tf.bool),
-                                    lambda: handle_not_first(dependency_states[i][layer]),
-                                    lambda: handle_first(dependency_states[i][layer]))
+                        children_tmp_states[layer] = tf.cond(self.placeholders['is_inference'],
+                                        lambda: save_lstm_state(children_tmp_states[layer],
+                                                                self.initial_children_tmp_states[layer], ctr),
+                                        lambda: children_tmp_states[layer])
+
+                        handle_last = lambda: future_state
+                        handle_not_last = lambda: restore_lstm_state(children_tmp_states[layer], ctr,
+                                                                     add_state=future_state)
+
+                        new_state = tf.cond(tf.cast(right_sibling, tf.bool),
+                                            handle_not_last, handle_last, strict=True)
+
+                        parent_index = tf.cond(self.placeholders['is_inference'], lambda: 0, lambda: parent)
+                        left_sibling_index = tf.cond(self.placeholders['is_inference'], lambda: 0, lambda: left_sibling)
+                        # save to parent
+                        handle_first = lambda: (children_tmp_states[layer],
+                                                save_lstm_state(dependency_states[i][layer], new_state,
+                                                                infer(parent_index)))
+                        # save to sibling
+                        handle_not_first = lambda: (save_lstm_state(children_tmp_states[layer], new_state,
+                                                                    infer(left_sibling_index)),
+                                                    dependency_states[i][layer])
+                        children_tmp_states[layer], dependency_states[i][layer] = \
+                                tf.cond(tf.cast(left_sibling, tf.bool), handle_not_first, handle_first)
+
+                    if layer == num_layers - 1:
+                        with tf.variable_scope('Parameters', reuse=True):
+                            U_dependency = tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
+                        predicted_output = dependency_outputs[i][layer].read(dependency_node) \
+                                           if dependency != 'children' else children_output.read(ctr)
+
+                        h_pred_ctr += tf.matmul(predicted_output, U_dependency)
+
 
                 if layer == num_layers - 1:
-                    with tf.variable_scope('Parameters', reuse=True):
-                        U_dependency = tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
-                    predicted_output = dependency_outputs[i][layer].read(dependency_node) \
-                                       if dependency != 'children' else children_output.read(ctr)
-                    predicted_output.set_shape([1, size])
-
-                    h_pred_ctr += tf.matmul(predicted_output, U_dependency)
-
-
-            if layer == num_layers - 1:
-                # only calculate loss after we handle both directions
-                if do_loss:
-                    loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
-                            self.calculate_loss(loss, h_pred_ctr, label_index, attr_index,
-                                                first_sibling, last_sibling)
-                else:
-                    h_pred = tf.concat(axis=0, values=[h_pred[:ctr,:,:], [h_pred_ctr], h_pred[ctr+1:,:,:]])
+                    # only calculate loss after we handle both directions
+                    if do_loss:
+                        loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
+                                self.calculate_loss(loss, h_pred_ctr, label_index, attr_index,
+                                                    first_sibling, last_sibling)
+                    else:
+                        h_pred = tf.concat(axis=0, values=[h_pred[:ctr,:,:], [h_pred_ctr], h_pred[ctr+1:,:,:]])
 
 
-            #ctr = tf.Print(ctr, [ctr])
-            ctr = tf.add(ctr, 1) if direction == 'forward' else tf.subtract(ctr, 1)
+                #ctr = tf.Print(ctr, [ctr, layer])
+                ctr = tf.add(ctr, 1) if direction == 'forward' else tf.subtract(ctr, 1)
 
 
-            return loss, ctr, h_pred, dependency_states, dependency_outputs, \
-                   children_tmp_states, children_output, children_predictor_states, \
-                   label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
-        return loop_body
+                return loss, ctr, h_pred, dependency_states, dependency_outputs, \
+                       children_tmp_states, children_output, children_predictor_states, \
+                       label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
+            return loop_body
 
-    directions = set()
-    for k in self.dependencies:
-        directions.add(possible_dependencies[k])
+        directions = set()
+        for k in self.dependencies:
+            directions.add(possible_dependencies[k])
 
-    loss = 0.0
-    # tensor array vs regular array??
-    h_pred = tf.zeros([total_data, 1, size])
+        loss = 0.0
+        # tensor array vs regular array??
+        h_pred = tf.zeros([total_data, 1, size])
 
-    #h_pred = tf.TensorArray(
-    #    tf.float32,
-    #    size=0,
-    #    dynamic_size=True,
-    #    clear_after_read=False,
-    #    infer_shape=False)
-    for layer in range(num_layers):
-        loops = 0
-        for direction in directions:
-            loops += 1
+        #h_pred = tf.TensorArray(
+        #    tf.float32,
+        #    size=0,
+        #    dynamic_size=True,
+        #    clear_after_read=False,
+        #    infer_shape=)
+        for layer in range(num_layers):
+            loops = 0
+            for direction in directions:
+                loops += 1
 
-            # forward starts iterating from 1, since 0 is the "empty" parent/sibling
-            ctr = 1 if direction == 'forward' else total_data - 1
-            # The last 3 arguments we need to "return" from the while loop, so that inference can use them directly
-            # XXX the last three args are just there because we need a tensor of the correct size. better way?
-            loss, ctr, h_pred, dependency_states, dependency_outputs, \
-                  children_tmp_states, children_output, children_predictor_states, \
-                  label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
-                tf.while_loop(loop_cond_wrapper(direction), loop_body_wrapper(direction, loops == len(directions) and layer == num_layers - 1, layer),
-                            [loss,
-                            ctr,
-                            h_pred,
-                            dependency_states,
-                            dependency_outputs,
-                            children_tmp_states,
-                            children_output,
-                            children_predictor_states,
-                            tf.zeros([1,label_size], tf.float32), # label_probabilities
-                            tf.zeros([1,attr_size], tf.float32), # attr_probabilities
-                            0.0, 0.0], # predicted_p_{first/last}
-                            parallel_iterations=1)
+                # forward starts iterating from 1, since 0 is the "empty" parent/sibling
+                ctr = 1 if direction == 'forward' else total_data - 1
+                # The last 3 arguments we need to "return" from the while loop, so that inference can use them directly
+                # XXX the last three args are just there because we need a tensor of the correct size. better way?
+                loss, ctr, h_pred, dependency_states, dependency_outputs, \
+                      children_tmp_states, children_output, children_predictor_states, \
+                      label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
+                    tf.while_loop(loop_cond_wrapper(direction), loop_body_wrapper(direction, loops == len(directions) and layer == num_layers - 1, layer),
+                                [loss,
+                                ctr,
+                                h_pred,
+                                dependency_states,
+                                dependency_outputs,
+                                children_tmp_states,
+                                children_output,
+                                children_predictor_states,
+                                tf.zeros([1,label_size], tf.float32), # label_probabilities
+                                tf.zeros([1,attr_size], tf.float32), # attr_probabilities
+                                0.0, 0.0], # predicted_p_{first/last}
+                                parallel_iterations=1)
 
-    self._cost = cost = tf.reduce_sum(loss)
+        self._cost = cost = tf.reduce_sum(loss)
 
 
-    # tensors we might want to have access to during inference
-    self.fetches = {
-        'cost': self._cost.name,
-        'predicted_p_first': predicted_p_first.name,
-        'predicted_p_last': predicted_p_last.name,
-        'label_probabilities': label_probabilities.name,
-        'attr_probabilities': attr_probabilities.name,
-        'states': {},
-        'outputs': {},
-    }
-    for i in range(len(self.dependencies)):
-        dep = self.dependencies[i]
-        self.fetches['states'][dep] = []
-        self.fetches['outputs'][dep] = []
-        position = 1 if dep != 'children' else 0
-        for j in range(num_layers):
-            # for inference, we only care about the "root" node's state
-            # children will end up writing the result to the parent
-            self.fetches['states'][dep].append({
-                'c': dependency_states[i][j][0].read(position).name,
-                'h': dependency_states[i][j][1].read(position).name,
+        # tensors we might want to have access to during inference
+        self.fetches = {
+            'cost': self._cost.name,
+            'predicted_p_first': predicted_p_first.name,
+            'predicted_p_last': predicted_p_last.name,
+            'label_probabilities': label_probabilities.name,
+            'attr_probabilities': attr_probabilities.name,
+            'states': {},
+            'outputs': {},
+            'children_tmp_states': [],
+            'children_predictor_states': [],
+            'children_output': children_output.read(0).name
+        }
+        for i in range(len(self.dependencies)):
+            dep = self.dependencies[i]
+            self.fetches['states'][dep] = []
+            self.fetches['outputs'][dep] = []
+            position = 1 if dep != 'children' else 0
+            for j in range(num_layers):
+                # for inference, we only care about the "root" node's state
+                # children will end up writing the result to the parent
+                self.fetches['states'][dep].append({
+                    'c': dependency_states[i][j][0].read(position).name,
+                    'h': dependency_states[i][j][1].read(position).name,
+                })
+                self.fetches['outputs'][dep].append(
+                    # this is the only one that children also writes into position 1
+                    dependency_outputs[i][j].read(1).name
+                )
+        if 'children' in self.dependencies:
+            self.fetches['children_output'] = children_output.read(position).name
+            self.fetches['children_tmp_states'] = []
+            self.fetches['children_predictor_states'] = []
+            for j in range(num_layers):
+                self.fetches['children_tmp_states'].append({
+                    'c': children_tmp_states[j][0].read(position).name,
+                    'h': children_tmp_states[j][1].read(position).name,
+                })
+                self.fetches['children_predictor_states'].append({
+                    'c': children_predictor_states[j][0].read(1).name,
+                    'h': children_predictor_states[j][1].read(1).name,
+                })
+
+        # Record the names of the LSTM states, so later when we want to do inference we can use them in
+        # the feed_dict
+        self.feed = {
+            'states': {},
+            'outputs': {},
+            'children_predictor_states': [],
+            'children_predictor_output': self.initial_children_predictor_output.name,
+            'leaf_input': self.initial_leaf_input.name,
+            'children_tmp_states': [],
+        }
+        for i in range(len(self.dependencies)):
+            dependency = self.dependencies[i]
+            self.feed['states'][dependency] = []
+            self.feed['outputs'][dependency] = []
+            # save this so we can manipulate the initial state when trying to perform inference
+            for j, (c, h) in enumerate(self.dependency_initial_states[dependency]):
+                self.feed['states'][dependency].append({
+                    'c': self.dependency_initial_states[dependency][j].c.name,
+                    'h': self.dependency_initial_states[dependency][j].h.name
+                })
+                self.feed['outputs'][dependency].append(
+                    self.dependency_initial_outputs[dependency][j].name
+                )
+        for j, (c, h) in enumerate(self.children_predictor_initial_states):
+            self.feed['children_predictor_states'].append({
+                'c': self.children_predictor_initial_states[j].c.name,
+                'h': self.children_predictor_initial_states[j].h.name,
             })
-            self.fetches['outputs'][dep].append(
-                dependency_outputs[i][j].read(position).name
-            )
-    if 'children' in self.dependencies:
-        self.fetches['children_output'] = children_output.read(0).name
-
-    # Record the names of the LSTM states, so later when we want to do inference we can use them in
-    # the feed_dict
-    self.feed = {
-        'initial_states': {},
-        'initial_outputs': {},
-    }
-    for i in range(len(self.dependencies)):
-        dependency = self.dependencies[i]
-        self.feed['initial_states'][dependency] = []
-        self.feed['initial_outputs'][dependency] = []
-        # save this so we can manipulate the initial state when trying to perform inference
-        for j, (c, h) in enumerate(self.dependency_initial_states[dependency]):
-            self.feed['initial_states'][dependency].append({
-                'c': self.dependency_initial_states[dependency][j].c.name,
-                'h': self.dependency_initial_states[dependency][j].h.name
+            self.feed['children_tmp_states'].append({
+                'c': self.initial_children_tmp_states[j].c.name,
+                'h': self.initial_children_tmp_states[j].h.name,
             })
-            self.feed['initial_outputs'][dependency].append(
-                self.dependency_initial_outputs[dependency][j].name
-            )
 
-    if not is_training:
-      return
+        if not is_training:
+          return
 
-    self._lr = tf.Variable(0.0, trainable=False)
-    tvars = tf.trainable_variables()
-    grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
-                                      config['max_grad_norm'])
-    optimizer = tf.train.GradientDescentOptimizer(self._lr)
-    self._train_op = optimizer.apply_gradients(
-        zip(grads, tvars),
-        global_step=tf.train.get_or_create_global_step())
+        self._lr = tf.Variable(0.0, trainable=False)
+        tvars = tf.trainable_variables()
+        grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
+                                          config['max_grad_norm'])
+        optimizer = tf.train.GradientDescentOptimizer(self._lr)
+        self._train_op = optimizer.apply_gradients(
+            zip(grads, tvars),
+            global_step=tf.train.get_or_create_global_step())
 
-    self._new_lr = tf.placeholder(
-        tf.float32, shape=[], name="new_learning_rate")
-    self._lr_update = tf.assign(self._lr, self._new_lr)
+        self._new_lr = tf.placeholder(
+            tf.float32, shape=[], name="new_learning_rate")
+        self._lr_update = tf.assign(self._lr, self._new_lr)
 
 
-  def calculate_loss(self, loss, h_pred, label_index, attr_index, first_sibling, last_sibling):
-      size = self.size
-      label_size = self.label_size
-      attr_size = self.attr_size
+    def calculate_loss(self, loss, h_pred, label_index, attr_index, first_sibling, last_sibling):
+        size = self.size
+        label_size = self.label_size
+        attr_size = self.attr_size
 
-      # grab all of the projection paramaters, now that we have the current node's LSTM state
-      with tf.variable_scope('Parameters', reuse=True):
-          u_last = tf.get_variable('u_last', [size], dtype=tf.float32)
-          u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
+        # grab all of the projection paramaters, now that we have the current node's LSTM state
+        with tf.variable_scope('Parameters', reuse=True):
+            u_last = tf.get_variable('u_last', [size], dtype=tf.float32)
+            u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
 
-          attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
-          attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
-          v_attr = tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
+            attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
+            attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
+            v_attr = tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
 
-          softmax_w = tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
-          softmax_b = tf.get_variable("softmax_b", [label_size], dtype=data_type())
+            softmax_w = tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
+            softmax_b = tf.get_variable("softmax_b", [label_size], dtype=data_type())
 
-          v_first = tf.get_variable("v_first", [label_size], dtype=data_type())
-          v_last = tf.get_variable("v_last", [label_size], dtype=data_type())
-
-
-      # predict where there is a sibling node (f = fraternal)
-      logits_p_last = tf.reduce_sum(tf.multiply(u_last, h_pred))
-      predicted_p_last = tf.sigmoid(logits_p_last)
-      logits_p_last = tf.expand_dims(logits_p_last, 0)
-      actual_p_last = tf.expand_dims(last_sibling, 0)
-      # TODO: paper uses sigmoid. How does this compare to cross entropy?
-      loss_p_last = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_last, labels=actual_p_last, name="p_last_loss")
-
-      logits_p_first = tf.reduce_sum(tf.multiply(u_first, h_pred))
-      predicted_p_first = tf.sigmoid(logits_p_first)
-      logits_p_first = tf.expand_dims(logits_p_first, 0)
-      actual_p_first = tf.expand_dims(first_sibling, 0)
-      # TODO: paper uses sigmoid. How does this compare to cross entropy?
-      loss_p_first = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_first, labels=actual_p_first, name="p_first_loss")
-
-      # XXX Testing shouldn't necessarily use is_leaf and last_sibling directly, according to paper?
-      # TODO: The paper doesn't seem to have a bias term. Could compare with and without
-      #label_logits = tf.matmul(h_pred, softmax_w) + softmax_b + tf.multiply(v_a, is_leaf) + tf.multiply(v_f, last_sibling)
-      label_logits = tf.matmul(h_pred, softmax_w) + softmax_b #+ tf.Print(tf.multiply(v_first, first_sibling), [tf.multiply(v_first, first_sibling)], "blah")
-
-      # XXX name things...
-      label_probabilities = tf.nn.softmax(label_logits)
-      actual_label = tf.one_hot(label_index, label_size)
-      # TODO: switch this to use sparse_softmax?
-      label_loss = tf.nn.softmax_cross_entropy_with_logits(logits=label_logits, labels=actual_label, name="label_loss")
-
-      attr_logits = tf.matmul(h_pred, attr_w) + attr_b + tf.matmul(tf.expand_dims(actual_label, 0), v_attr)
-      attr_probabilities = tf.nn.softmax(attr_logits)
-      actual_attr = tf.one_hot(attr_index, attr_size)
-      attr_loss = tf.nn.softmax_cross_entropy_with_logits(logits=attr_logits, labels=actual_attr, name="attr_loss")
+            v_first = tf.get_variable("v_first", [label_size], dtype=data_type())
+            v_last = tf.get_variable("v_last", [label_size], dtype=data_type())
 
 
-      # TODO: could differ the weights for structural predictions vs the label predictions when calculating loss
-      # XXX XXX XXX somehow only include the correct directions (like, forward direction shouldn't affect loss_p_first?)
-      loss = tf.add(loss, tf.reduce_sum(loss_p_last))
-      loss = tf.add(loss, tf.reduce_sum(loss_p_first))
-      loss = tf.add(loss, tf.reduce_sum(attr_loss))
-      loss = tf.add(loss, tf.reduce_sum(label_loss))
+        # predict where there is a sibling node (f = fraternal)
+        logits_p_last = tf.reduce_sum(tf.multiply(u_last, h_pred))
+        predicted_p_last = tf.sigmoid(logits_p_last)
+        logits_p_last = tf.expand_dims(logits_p_last, 0)
+        actual_p_last = tf.expand_dims(last_sibling, 0)
+        # TODO: paper uses sigmoid. How does this compare to cross entropy?
+        loss_p_last = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_last, labels=actual_p_last, name="p_last_loss")
 
-      return loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
+        logits_p_first = tf.reduce_sum(tf.multiply(u_first, h_pred))
+        predicted_p_first = tf.sigmoid(logits_p_first)
+        logits_p_first = tf.expand_dims(logits_p_first, 0)
+        actual_p_first = tf.expand_dims(first_sibling, 0)
+        # TODO: paper uses sigmoid. How does this compare to cross entropy?
+        loss_p_first = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_first, labels=actual_p_first, name="p_first_loss")
 
-  def assign_lr(self, session, lr_value):
-    session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
+        # XXX Testing shouldn't necessarily use is_leaf and last_sibling directly, according to paper?
+        # TODO: The paper doesn't seem to have a bias term. Could compare with and without
+        #label_logits = tf.matmul(h_pred, softmax_w) + softmax_b + tf.multiply(v_a, is_leaf) + tf.multiply(v_f, last_sibling)
+        label_logits = tf.matmul(h_pred, softmax_w) + softmax_b #+ tf.Print(tf.multiply(v_first, first_sibling), [tf.multiply(v_first, first_sibling)], "blah")
 
-  @property
-  def probabilities(self):
-    return self._probabilities
+        # XXX name things...
+        label_probabilities = tf.nn.softmax(label_logits)
+        actual_label = tf.one_hot(label_index, label_size)
+        # TODO: switch this to use sparse_softmax?
+        label_loss = tf.nn.softmax_cross_entropy_with_logits(logits=label_logits, labels=actual_label, name="label_loss")
 
-  @property
-  def initial_state(self):
-    return self._initial_state
+        attr_logits = tf.matmul(h_pred, attr_w) + attr_b + tf.matmul(tf.expand_dims(actual_label, 0), v_attr)
+        attr_probabilities = tf.nn.softmax(attr_logits)
+        actual_attr = tf.one_hot(attr_index, attr_size)
+        attr_loss = tf.nn.softmax_cross_entropy_with_logits(logits=attr_logits, labels=actual_attr, name="attr_loss")
 
-  @property
-  def cost(self):
-    return self._cost
 
-  @property
-  def final_state(self):
-    return self._final_state
+        # TODO: could differ the weights for structural predictions vs the label predictions when calculating loss
+        # XXX XXX XXX somehow only include the correct directions (like, forward direction shouldn't affect loss_p_first?)
+        loss = tf.add(loss, tf.reduce_sum(loss_p_last))
+        loss = tf.add(loss, tf.reduce_sum(loss_p_first))
+        loss = tf.add(loss, tf.reduce_sum(attr_loss))
+        loss = tf.add(loss, tf.reduce_sum(label_loss))
 
-  @property
-  def lr(self):
-    return self._lr
+        return loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
 
-  @property
-  def train_op(self):
-    return self._train_op
+    def assign_lr(self, session, lr_value):
+        session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
+
+    @property
+    def probabilities(self):
+        return self._probabilities
+
+    @property
+    def initial_state(self):
+        return self._initial_state
+
+    @property
+    def cost(self):
+        return self._cost
+
+    @property
+    def final_state(self):
+        return self._final_state
+
+    @property
+    def lr(self):
+        return self._lr
+
+    @property
+    def train_op(self):
+        return self._train_op
 
 
 def run_epoch(session, model, data, eval_op=None, verbose=False):
@@ -808,11 +821,9 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
 
         # these aren't used if is_inference is False, but it seems we still need
         # to feed them in evidently :-\
-        for k in model.dependencies:
+        for k in model.placeholders['inference']:
             feed_dict[model.placeholders['inference'][k]['label']] = 0
             feed_dict[model.placeholders['inference'][k]['attr']] = 0
-        feed_dict[model.placeholders['inference']['self']['label']] = 0
-        feed_dict[model.placeholders['inference']['self']['attr']] = 0
 
         vals = session.run(fetches, feed_dict)
         cost = vals["cost"]
