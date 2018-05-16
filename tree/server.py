@@ -8,23 +8,21 @@ from pprint import pprint
 import time
 import json
 import os
-import tree_read
+import preprocess
 import re
 
-from pycparser import c_parser, c_ast, parse_file, c_generator
+from pycparser import c_parser, c_ast, parse_file
 
 import numpy as np
 import tensorflow as tf
 import queue as Q
-import check_correct
+#import check_correct
 
 import dump_ast
 
 flags = tf.flags
 logging = tf.logging
 
-flags.DEFINE_string("save_path", None,
-                    "Model output directory.")
 flags.DEFINE_bool("use_fp16", False,
                   "Train using 16-bit floats instead of 32bit floats")
 
@@ -36,7 +34,6 @@ flags.DEFINE_string("task_path", None,
 FLAGS = flags.FLAGS
 
 max_changes = 3
-generator = c_generator.CGenerator()
 
 # side effect: populate node_properties with parent pointers (not yet used?)
 def fill_queue(node, node_properties, q, parent=None):
@@ -67,7 +64,7 @@ def search_changes(ast, node_properties, list_q, max_changes, filename, directiv
                 setattr(node, name, node_properties[node]['attr_expected'])
                 if num_changes == max_changes - 1:
                     #try:
-                        code = directives + generator.visit(ast)
+                        #code = directives + generator.visit(ast)
                         path = os.path.join(FLAGS.task_path, '.' + filename + '.c')
                         with open(path, 'w') as f:
                             f.write(code)
@@ -112,23 +109,36 @@ def search(ast, node_properties, filename, directives):
             return code
     return False
 
+def convert(i):
+    if isinstance(i, np.float32):
+        return np.asscalar(i)
+    elif isinstance(i, np.ndarray):
+        return i.tolist()
+    elif isinstance(i, dict):
+        if 'forward' in i or 'reverse' in i:
+            out = {}
+            for k in i:
+                out[k] = convert(i[k])
+            return out
+        else:
+            return False
+    else:
+        return i
 
 def print_ast(ast, node_properties):
-    # ignore dumb typedefs for now
-    if ast.__class__.__name__ in dump_ast.ignore:
+    if ast not in node_properties:
         return False
 
     output = {
-        "name": ast.__class__.__name__,
         "children": []
     }
-
-    for k in ['expected_probability', 'target_probability', 'ratio', 'p_a', 'p_f', 'attr_expected_probability',
-              'attr_target_probability', 'attr_ratio']:
-        output[k] = float(node_properties[ast][k])
-    output['expected'] = node_properties[ast]['expected']
-    output['attr_expected'] = node_properties[ast]['attr_expected']
-    output['attr_actual'] = node_properties[ast]['attr_actual']
+    props = node_properties[ast]
+    for k in props:
+        if k in ['self', 'dependencies']:
+            continue
+        conversion = convert(props[k])
+        if conversion:
+            output[k] = conversion
 
     children = ast.children()
     for i in range(len(children)):
@@ -137,15 +147,120 @@ def print_ast(ast, node_properties):
             output['children'].append(ret)
     return output
 
-
-def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
+def run_linear_epoch(session, graph, config, tokens, raw_data):
     directions = set()
     for k in config['dependencies']:
-        directions.add(config['possible_dependencies'][k])
-    directions = sorted(list(directions))
+        directions.add(config['dependencies'][k])
+
+    props = [{d: {} for d in directions} for i in tokens]
+    for direction in directions:
+        data_dict = {}
+        for k in config['features']:
+            p = config['placeholders']['features'][k]
+            if k == 'left_sibling':
+                data_dict[p] = [[0] + list(range(len(tokens) - 1))]
+            elif k == 'right_sibling':
+                data_dict[p] = [[0] + list(range(2, len(tokens))) + [0]]
+            elif k == 'label_index':
+                data_dict[p] = [[token[0] for token in tokens]]
+            elif k == 'mask':
+                data_dict[p] = [[0] + [1] * (len(tokens)-1)]
+            else:
+                data_dict[p] = [[0] * len(tokens)]
+        session.run(config['ops']['node_iter'], data_dict)
+
+        feed_dict = {
+            config['placeholders']['is_inference']: False
+        }
+        vals = session.run(config['fetches']['loss'], feed_dict)
+        #cost = 0
+        #r = range(1, len(tokens)) if direction == 'forward' else range(len(tokens)-1,0,-1)
+        #for i in r:
+        #    if props[i] is None:
+        #        props[i] = {
+        #            'token': tokens[i][1]
+        #        }
+        #    token = tokens[i][0]
+        #    for k in config['placeholders']['data']:
+        #        feed_dict[config['placeholders']['data'][k]] = [0, 0]
+        #    feed_dict[config['placeholders']['data']['label_index']] = [0, token]
+
+        #    feed_dict[config['placeholders']['inference']['self']['label']] = token
+        #    feed_dict[config['placeholders']['inference']['self']['attr']] = 0
+        #    feed_dict[config['placeholders']['inference']['right_sibling']['label']] = tokens[i+1][0] if i+1<len(tokens) else 0
+        #    feed_dict[config['placeholders']['inference']['right_sibling']['attr']] = 0
+        #    feed_dict[config['placeholders']['inference']['left_sibling']['label']] = tokens[i-1][0] if i != 0 else 0
+        #    feed_dict[config['placeholders']['inference']['left_sibling']['attr']] = 0
+
+        #    sibling = i-1 if direction == 'forward' else i+1
+        #    dependent = 'left_sibling' if direction == 'forward' else 'right_sibling'
+        #    for layer in range(config['num_layers']):
+        #        state = config['feed']['states'][dependent][layer]
+        #        output = config['feed']['outputs'][dependent][layer]
+        #        if direction == 'forward' and i-1 == 0 or direction == 'reverse' and i+1 == len(props):
+        #            feed_dict[state['c']] = initial['states'][dependent][layer].c
+        #            feed_dict[state['h']] = initial['states'][dependent][layer].h
+        #            feed_dict[output] = initial['outputs'][dependent][layer]
+        #        else:
+        #            feed_dict[state['c']] = props[sibling]['states'][dependent][layer]['c']
+        #            feed_dict[state['h']] = props[sibling]['states'][dependent][layer]['h']
+        #            feed_dict[output] = props[sibling]['outputs'][dependent][layer]
+
+        #    fetches = {
+        #        'states': {dependent: {}},
+        #        'outputs': {dependent: {}},
+        #        'cost': config['fetches']['cost'][direction],
+        #        'label_probabilities': config['fetches']['label_probabilities'][direction]
+        #    }
+        #    for layer in range(config['num_layers']):
+        #        fetches['states'][dependent][layer] = config['fetches']['states'][dependent][layer]
+        #        fetches['outputs'][dependent][layer] = config['fetches']['outputs'][dependent][layer]
+        #    vals = session.run(fetches, feed_dict)
+
+        #    if 'states' not in props[i]:
+        #        props[i]['states'] = {}
+        #    if 'outputs' not in props[i]:
+        #        props[i]['outputs'] = {}
+        #    props[i]['states'].update(vals['states'])
+        #    props[i]['outputs'].update(vals['outputs'])
+
+        #for k in vals:
+            #props[i][k] = vals[k]
+            # get ids of expected and actual labels
+
+        probs = vals[direction]['label']['probabilities'][0]
+        target_ids = data_dict[config['placeholders']['features']['label_index']][0]
+        for i in range(len(tokens)):
+            rank = np.flip(np.argsort(probs[i]), 0)
+            props[i][direction]['token'] = tokens[i][1]
+            props[i][direction]['label_expected'] = raw_data['id_to_label'][rank[0]]
+            props[i][direction]['label_expected_probability'] = float(probs[i][rank[0]])
+            props[i][direction]['label_actual'] = raw_data['id_to_label'][target_ids[i]]
+            props[i][direction]['label_actual_probability'] = float(probs[i][target_ids[i]])
+            props[i][direction]['label_ratio'] = float(probs[i][target_ids[i]] /
+                    (probs[i][rank[0]]))
+                    #(probabilities[i][expected_ids[i]] + probabilities[i][target_ids[i]]))
+            props[i][direction]['probabilities'] = [(float(probs[i][j]), raw_data['id_to_label'][j]) for j in rank]
+        for k in vals[direction]:
+            print('{} {} perplexity: {}'.format(direction, k, np.exp(vals[direction][k]['loss'])))
+
+        #cost += vals['cost']
+
+    props.pop(0)
+    #for i in range(len(props)):
+    #    del(props[i]['states'])
+    #    del(props[i]['outputs'])
+    return props
+
+
+def run_ast_epoch(session, graph, config, ast, node_properties, raw_data):
+    directions = set()
+    for k in config['dependencies']:
+        directions.add(config['dependencies'][k])
 
     def visit_tree(node, direction, layer):
-        if node.__class__.__name__ in dump_ast.ignore:
+        # the node was removed from the tree
+        if node not in node_properties:
             return False
 
         cost = 0
@@ -155,19 +270,17 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
                 cost += visit_tree(children[i][1], direction, layer)
 
         is_last_layer = layer == config['num_layers'] - 1
-        include_cost = is_last_layer and (direction == 'reverse' or len(directions) == 1)
 
         props = node_properties[node]
 
         # only need to do once
         if direction == 'forward' or len(directions) == 1:
-            label_index = raw_data['token_to_id'][props['label']] \
-                            if props['label'] in raw_data['token_to_id'] \
-                            else raw_data['token_to_id']['<unk_label>']
+            label_index = raw_data['label_to_id'][props['label']] \
+                            if props['label'] in raw_data['label_to_id'] \
+                            else raw_data['label_to_id']['<unk_label>']
             for (name, val) in props['attrs']:
                 if name in ['value', 'op', 'name']:
-                    attr_index = tree_read.tokens_to_ids([[val]],
-                            raw_data['attr_to_id'], False)[0][0]
+                    attr_index = preprocess.tokens_to_ids([val], raw_data['attr_to_id'], False, False)[0]
                     break
             else:
                 attr_index = raw_data['attr_to_id']['<no_attr>']
@@ -188,20 +301,27 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
         if direction == 'reverse' and 'children' in config['dependencies']:
             if is_last_layer:
                 fetches['children_predictor_states'] = { layer: config['fetches']['children_predictor_states'][layer] }
+                fetches['predicted_right_hole'] = config['fetches']['predicted_right_hole']
             if props['dependencies']['left_sibling'] is not None:
                 fetches['children_tmp_states'] = { layer: config['fetches']['children_tmp_states'][layer] }
             else:
                 fetches['states']['children'] = { layer: config['fetches']['states']['children'][layer] }
                 if is_last_layer:
                     fetches['children_output'] = config['fetches']['children_output']
-        if include_cost:
-            for k in ['cost', 'predicted_p_first', 'predicted_p_last', 'label_probabilities', 'attr_probabilities']:
-                fetches[k] = config['fetches'][k]
+
+        if is_last_layer:
+            for k in ['cost', 'predicted_end', 'label_probabilities', 'attr_probabilities']:
+                fetches[k] = config['fetches'][k][direction]
+
+        if is_last_layer:
+            fetches['h_pred'] = config['fetches']['h_pred']
 
         feed_dict = {
             config['placeholders']['is_inference']: True,
-            config['feed']['leaf_input']: initial['leaf_input']
         }
+
+        if 'children' in config['dependencies']:
+            feed_dict[config['feed']['leaf_input']] = initial['leaf_input']
 
         for k in config['placeholders']['data']:
             feed_dict[config['placeholders']['data'][k]] = [0, props[k]]
@@ -221,6 +341,13 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
             else:
                 feed_dict[config['placeholders']['inference'][key]['label']] = 0
                 feed_dict[config['placeholders']['inference'][key]['attr']] = 0
+
+            if is_last_layer:
+                dependency_node = props['dependencies']['right_hole']
+                if dependency_node is not None and 'h_pred' in node_properties[dependency_node]:
+                    dependency_props = node_properties[dependency_node]
+                    #for i in range(len(config['dependencies'])):
+                    #    feed_dict[config['feed']['h_pred'][i]] = dependency_props['h_pred'][config['dependencies'][i]]
 
             for i in range(config['num_layers']):
                 state = config['feed']['states'][dependency][i]
@@ -269,6 +396,7 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
                 else:
                     feed_dict[config['feed']['children_predictor_output']] = initial['children_predictor_output']
 
+
         # TODO: this seems to run through the entire while loop each time, despite the fact that
         # we only want to do one layer at a time. Oh, that might actually be because
         # "dependency_outputs[i][layer-1].read(ctr)" requires processing earlier layers. But why do later ones
@@ -279,8 +407,8 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
             props['states'] = {}
         if 'outputs' not in props:
             props['outputs'] = {}
-
-        props['outputs'].update(vals['outputs'])
+        if 'h_pred' not in props:
+            props['h_pred'] = {}
 
         if 'children' in config['dependencies'] and direction == 'reverse':
             if props['dependencies']['left_sibling'] is not None:
@@ -300,33 +428,38 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
                     parent_props['states']['children'] = {}
                 parent_props['states']['children'].update(vals['states']['children'])
                 del(vals['states']['children'])
+
+        #for k in vals:
+        #    if k in props:
+        #        props[k].update(vals[k])
+        #    else:
+        #        props[k] = vals[k]
         props['states'].update(vals['states'])
+        props['outputs'].update(vals['outputs'])
 
-        if include_cost:
-            props['probabilities'] = probabilities = vals['label_probabilities'][0]
-            expected_id = np.argmax(probabilities)
-            props['expected'] = raw_data['id_to_token'][expected_id]
-            props['expected_probability'] = probabilities[expected_id]
+        if is_last_layer:
+            props['h_pred'].update(vals['h_pred'])
+            # get ids of expected and actual labels
+            for k in ['attr', 'label']:
+                if k + '_expected' not in props:
+                    props[k + '_expected_probability'] = {}
+                    props[k + '_actual_probability'] = {}
+                    props[k + '_ratio'] = {}
 
-            #target_id = raw_data['token_to_id'][node.__class__.__name__]
-            target_id = feed_dict[config['placeholders']['data']['label_index']][1]
-            props['target_probability'] = probabilities[target_id]
+                probabilities = vals[k + '_probabilities']
+                expected_id = np.argmax(probabilities)
+                target_id = feed_dict[config['placeholders']['data'][k + '_index']][1]
 
-            props['ratio'] = probabilities[target_id] / probabilities[expected_id]
+                # should also indicate if it was cast to <unk> or something?
+                props[k + '_expected'] = raw_data['id_to_' + k][expected_id]
+                props[k + '_actual'] = raw_data['id_to_' + k][target_id]
 
-            props['attr_probabilities'] = attr_probabilities = vals['attr_probabilities'][0]
-            attr_expected_id = np.argmax(attr_probabilities)
-            # check <unk>
-            props['attr_expected'] = raw_data['id_to_attr'][attr_expected_id]
-            props['attr_expected_probability'] = attr_probabilities[attr_expected_id]
-            attr_target_id = feed_dict[config['placeholders']['data']['attr_index']][1]
-            props['attr_actual'] = raw_data['id_to_attr'][attr_target_id]
-            props['attr_target_probability'] = attr_probabilities[attr_target_id]
-
-            props['attr_ratio'] = attr_probabilities[attr_target_id] / attr_probabilities[attr_expected_id]
-
-            props['p_a'] = feed_dict[config['placeholders']['data']['last_sibling']][1]
-            props['p_f'] = vals['predicted_p_first']
+                props[k + '_expected_probability'][direction] = probabilities[expected_id]
+                props[k + '_actual_probability'][direction] = probabilities[target_id]
+                props[k + '_ratio'][direction] = probabilities[target_id] / probabilities[expected_id]
+            if 'predicted_end' not in props:
+                props['predicted_end'] = {}
+            props['predicted_end'][direction] = vals['predicted_end']
 
             cost += vals['cost']
 
@@ -337,10 +470,11 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
 
         return cost
 
-    for i in range(len(directions)):
+    # remove the nil token
+    props.pop(0)
+    for direction in directions:
         for j in range(config['num_layers']):
-            # only care about cost on the reverse trip?
-            cost = visit_tree(ast, directions[i], j)
+            cost = visit_tree(ast, direction, j)
     print(cost)
 
 
@@ -359,136 +493,79 @@ def run_epoch(session, graph, config, ast, node_properties, raw_data, initial):
     #print(output)
     #return output
 
-# https://stackoverflow.com/questions/2319019/using-regex-to-remove-comments-from-source-files
-def remove_comments(string):
-    pattern = r"(\".*?\"|\'.*?\')|(/\*.*?\*/|//[^\r\n]*$)"
-    # first group captures quoted strings (double or single)
-    # second group captures comments (//single-line or /* multi-line */)
-    regex = re.compile(pattern, re.MULTILINE|re.DOTALL)
-    def _replacer(match):
-        # if the 2nd group (capturing comments) is not None,
-        # it means we have captured a non-quoted (real) comment string.
-        if match.group(2) is not None:
-            return "" # so we will return empty to remove the comment
-        else: # otherwise, we will return the 1st group
-            return match.group(1) # captured quoted-string
-    return regex.sub(_replacer, string)
-
-def grab_directives(string):
-    # not perfect...
-    pattern = r"(^\s*#[^\r\n]*[\r\n])"
-    regex = re.compile(pattern, re.MULTILINE|re.DOTALL)
-
-    directives = ''.join(regex.findall(string))
-    def _replacer(match):
-        return ""
-    sub = regex.sub(_replacer, string)
-    return directives, sub
-
-
 def main(_):
     directory = os.path.dirname(os.path.realpath(__file__))
     os.chdir(directory)
 
-    raw_data = dict()
-    with open(os.path.join(FLAGS.data_path, 'tree_tokens.json')) as f:
-        token_ids = json.load(f)
-        raw_data['token_to_id'] = token_ids['ast_labels']
-        raw_data['attr_to_id'] = token_ids['label_attrs']
+    best_dir = os.path.join(FLAGS.data_path, 'best')
+    with open(os.path.join(best_dir, 'config.json')) as f:
+        config = json.load(f)
+    # fix windows path separators
+    config['data_path'] = os.path.join(*config['data_path'].split('\\'))
 
-    raw_data['id_to_token'] = dict()
-    for k in raw_data['token_to_id']:
-        raw_data['id_to_token'][raw_data['token_to_id'][k]] = k
+    raw_data = dict()
+    with open(os.path.join(config['data_path'], config['model'] + '_lexicon.json')) as f:
+        token_ids = json.load(f)
+    raw_data['label_to_id'] = token_ids['label_ids']
+    raw_data['attr_to_id'] = token_ids['attr_ids']
+
+    raw_data['id_to_label'] = dict()
+    for k in raw_data['label_to_id']:
+        raw_data['id_to_label'][raw_data['label_to_id'][k]] = k
 
     raw_data['id_to_attr'] = dict()
     for k in raw_data['attr_to_id']:
         raw_data['id_to_attr'][raw_data['attr_to_id'][k]] = k
 
-    with open(os.path.join(FLAGS.save_path, "tree_training_config.json")) as f:
-        config = json.load(f)
-
     with tf.Graph().as_default() as graph:
-        saver = tf.train.import_meta_graph(os.path.join(FLAGS.save_path, "tree_model.meta"))
+        saver = tf.train.import_meta_graph(os.path.join(best_dir, "model.meta"))
 
         with tf.Session() as session:
-            saver.restore(session, os.path.join(FLAGS.save_path, 'tree_model'))
-
-            #initial_output = session.run([config['feed']['initial_output']])[0] if 'children' in config['dependencies'] else 0
-
-            initial = {
-                'states': {},
-                'outputs': {},
-                'children_predictor_states': [],
-                'children_tmp_states': []
-            }
-
-            feed_dict = {
-                config['placeholders']['is_inference']: True
-            }
-
-            for k in config['placeholders']['inference']:
-                feed_dict[config['placeholders']['inference'][k]['label']] = 0
-                feed_dict[config['placeholders']['inference'][k]['attr']] = 0
-            for k in config['placeholders']['data']:
-                feed_dict[config['placeholders']['data'][k]] = [0]
-
-            for k in config['feed']['states']:
-                initial['states'][k] = []
-                initial['outputs'][k] = []
-                for i in range(config['num_layers']):
-                    c, h = session.run([config['feed']['states'][k][i]['c'],
-                                        config['feed']['states'][k][i]['h']])
-                    # don't really need to wrap this up in an LSTM tuple
-                    initial['states'][k].append(tf.contrib.rnn.LSTMStateTuple(c, h))
-                    initial['outputs'][k].append(session.run([config['feed']['outputs'][k][i]], feed_dict)[0])
-            for i in range(config['num_layers']):
-                c, h = session.run([config['feed']['children_predictor_states'][i]['c'],
-                                    config['feed']['children_predictor_states'][i]['h']])
-                initial['children_predictor_states'].append(tf.contrib.rnn.LSTMStateTuple(c, h))
-                c, h = session.run([config['feed']['children_tmp_states'][i]['c'],
-                                    config['feed']['children_tmp_states'][i]['h']])
-                initial['children_tmp_states'].append(tf.contrib.rnn.LSTMStateTuple(c, h))
-            initial['children_predictor_output'] = session.run([config['feed']['children_predictor_output']], feed_dict)[0]
-            initial['leaf_input'] = session.run([config['feed']['leaf_input']], feed_dict)[0]
-
+            saver.restore(session, os.path.join(best_dir, 'model'))
 
             parser = c_parser.CParser()
             while True:
-                for filename in os.listdir(FLAGS.task_path):
+                task_path = os.path.join(FLAGS.task_path, config['model'])
+                for filename in os.listdir(task_path):
                     if filename.startswith('.'):
                         continue
-                    try:
-                        with open(os.path.join(FLAGS.task_path, filename)) as f:
-                            text = f.read()
-                        directives, preprocessed = grab_directives(remove_comments(text))
-                        # XXX XXX XXX TYPES ARE AWFUL
-                        ast = parser.parse('typedef char* string;\n' + preprocessed)
-                        #ast = parse_file(os.path.join(FLAGS.task_path, filename), use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I../fake_libc_include'])
-                    except ValueError:
-                        # TODO: return some kind of error about failure to parse
-                        #print(str(sys.exc_info()[0]))
-                        continue
+                    filepath = os.path.join(task_path, filename)
+                    with open(filepath) as f:
+                        text = f.read()
+                    directives, _ = preprocess.grab_directives(text)
+                    # XXX this can return None
+                    ast_nodes, ast, node_properties, tokens = preprocess.preprocess_c(filepath,
+                            include_dependencies=True)
 
-                    # Can't add attributes directly to Nodes because the class uses __slots__, so use this dictionary to
-                    # extend objects
-                    node_properties = {}
-                    ret = dump_ast.linearize_ast(ast, node_properties=node_properties) # XXX how slow is this?
-                    run_epoch(session, graph, config, ast, node_properties, raw_data, initial)
-                    code = "blah"#search(ast, node_properties, filename, directives)
-                    output = {
-                        'ast': print_ast(ast, node_properties),
-                        'fixed_code': code
-                    }
+                    if config['model'] == 'ast':
+                        # Can't add attributes directly to Nodes because the class uses __slots__, so use this dictionary to
+                        # extend objects
+                        run_ast_epoch(session, graph, config, ast, node_properties, raw_data)
+                        code = "blah"#search(ast, node_properties, filename, directives)
+                        output = {
+                            'ast': print_ast(ast, node_properties),
+                            #'code': generator.visit(ast),
+                            'fixed_code': code
+                        }
+                    else:
+                        tokens.insert(0, '<nil>')
+                        tokens = preprocess.tokens_to_ids(tokens, raw_data['label_to_id'], True, True)
+                        props = run_linear_epoch(session, graph, config, tokens, raw_data)
+                        code = "blah"#search(ast, node_properties, filename, directives)
+                        output = {
+                            'linear': props,
+                            'fixed_code': code
+                        }
 
-                    with open(os.path.join(FLAGS.task_path, '.' + filename + '-results-tmp'), 'w') as f:
+                    with open(os.path.join(task_path, '.' + filename + '-results-tmp'), 'w') as f:
                         json.dump(output, f)
 
                     # make the output file appear atomically
-                    os.rename(os.path.join(FLAGS.task_path, '.' + filename + '-results-tmp'),
-                              os.path.join(FLAGS.task_path, '.' + filename + '-results'));
+                    os.rename(os.path.join(task_path, '.' + filename + '-results-tmp'),
+                              os.path.join(task_path, '.' + filename + '-results'));
 
                     try:
-                        os.unlink(os.path.join(FLAGS.task_path, filename))
+                        os.unlink(os.path.join(task_path, filename))
                     except FileNotFoundError:
                         pass
                 time.sleep(0.01)

@@ -1,13 +1,3 @@
-# Largely based on Tree-Structured Decoding with Doublyrecurrent Neural Networks
-# (https://openreview.net/pdf?id=HkYhZDqxg)
-
-# TODO (potential):
-# * Could eventually do something with attention over the children (for the separate RNN that predicts the parent)
-# * Have a decoder for the above RNN, or just give the output directly from this RNN to h_pred?
-# * Attention over all the U_dependencies?
-# * Include placement of node within tree
-# * Some way of incorporating the Child RNN into the TreeRNN so that arbitrary children can appear?
-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -16,27 +6,32 @@ import inspect
 import time
 import json
 from pprint import pprint
-import os
+import os, sys
 
 import numpy as np
 import tensorflow as tf
+from tensorarray import RNNTensorArray, RNNTensorArrayCell
+from tree_lstm import TreeLSTMCell
 
-flags = tf.flags
-logging = tf.logging
-
-flags.DEFINE_string(
-    "model", "test",
-    "A type of model. Possible options are: small, medium, large.")
-flags.DEFINE_string("save_path", None,
-                    "Model output directory.")
-flags.DEFINE_string("data_path", None,
-                    "XXX")
-flags.DEFINE_string("dependencies", None,
-                    "XXX")
-flags.DEFINE_bool("use_fp16", False,
-                  "Train using 16-bit floats instead of 32bit floats")
-
-FLAGS = flags.FLAGS
+#possible_configurations = {
+#    'top_left',
+#    'bottom_right',
+#    'bottom_left',
+#    'top_right',
+#    'top',
+#    'bottom',
+#    'left',
+#    'right'
+#}
+#
+#possible_dependencies = {
+#    'parent': 'top',
+#    'left_sibling': 'left',
+#    'left_prior': 'left',
+#    'children': 'bottom',
+#    'right_sibling': 'right',
+#    'right_prior': 'right'
+#}
 
 possible_dependencies = {
     'parent': 'forward',
@@ -47,909 +42,518 @@ possible_dependencies = {
     'right_prior': 'reverse'
 }
 
-SmallConfig = {
-  "init_scale" : 0.1,
-  "learning_rate" : 1.0,
-  "max_grad_norm" : 5,
-  "num_layers" : 2,
-  "num_steps" : 20, # this isn't used at all in this file, since we aren't doing any truncated backpropagation
-  "hidden_size" : 200,
-  "max_epoch" : 4,
-  "max_max_epoch" : 6,
-  "keep_prob" : 1.0,
-  "lr_decay" : 0.5,
-  "batch_size" : 40, # currently, this is just 1
-}
-
-MediumConfig = {
-  "init_scale" : 0.05,
-  "learning_rate" : 1.0,
-  "max_grad_norm" : 5,
-  "num_layers" : 2,
-  "num_steps" : 35,
-  "hidden_size" : 650,
-  "max_epoch" : 6,
-  "max_max_epoch" : 39,
-  "keep_prob" : 0.5,
-  "lr_decay" : 0.8,
-  "batch_size" : 20,
-}
-
-LargeConfig = {
-  "init_scale" : 0.04,
-  "learning_rate" : 1.0,
-  "max_grad_norm" : 10,
-  "num_layers" : 2,
-  "num_steps" : 35,
-  "hidden_size" : 1500,
-  "max_epoch" : 14,
-  "max_max_epoch" : 55,
-  "keep_prob" : 0.35,
-  "lr_decay" : 1 / 1.15,
-  "batch_size" : 20,
-}
-
-TestConfig = {
-  "init_scale" : 0.1,
-  "learning_rate" : 1.0,
-  "max_grad_norm" : 1,
-  "num_layers" : 1,
-  "num_steps" : 2,
-  "hidden_size" : 4,
-  "max_epoch" : 1,
-  "max_max_epoch" : 1,
-  "keep_prob" : 1.0,
-  "lr_decay" : 0.5,
-  "batch_size" : 20,
+invert = {
+    'right_sibling': 'left_sibling',
+    'left_sibling': 'right_sibling',
+    'parent': 'left_child',
+    'children': 'parent',
+    'left_prior': 'right_prior',
+    'right_prior': 'left_prior'
 }
 
 def data_type():
-    return tf.float16 if FLAGS.use_fp16 else tf.float32
-
-# store the LSTM state in a TensorArray
-def save_lstm_state(state_array, state, position):
-    # c is in position 0, h is in position 1
-    return [state_array[0].write(position, state.c),
-            state_array[1].write(position, state.h)]
-
-# store the LSTM state in a TensorArray
-def save_multi_lstm_state(state_array, state, position):
-    copy = []
-    for i, (c, h) in enumerate(state):
-        copy.append(save_lstm_state(state_array[i], state[i], position))
-    return copy
-
-# reconstruct the LSTM state from a TensorArray
-# initial_state is needed to use as a template for restoration
-def restore_lstm_state(state_array, position, add_state=None):
-    c = state_array[0].read(position)
-    h = state_array[1].read(position)
-    if add_state is not None:
-        c += add_state.c
-        h += add_state.h
-
-    return tf.contrib.rnn.LSTMStateTuple(c, h)
-
-def restore_multi_lstm_state(state_array, num_layers, position):
-    state = []
-    for i in range(num_layers):
-        state.append(restore_lstm_state(state_array[i], position))
-    return tuple(state)
-
-def init_tensor_array(total_data, hidden_size):
-    return tf.TensorArray(
-                data_type(),
-                size=total_data,
-                dynamic_size=False,
-                clear_after_read=False,
-                infer_shape=True,
-                element_shape=[1, hidden_size])
-
-# initialize an array of TensorArrays to store an LSTM
-def init_lstm_array(num_layers, total_data, hidden_size):
-    states = []
-    for i in range(num_layers):
-        states.append([])
-        # 1 for c, 1 for h
-        for k in range(2):
-            states[i].append(init_tensor_array(total_data, hidden_size))
-    return states
-
-
-
-# we no longer store (c,h), but rather, "c" is the part of the memory cell already past through the forget gate
-class TreeLSTMCell():
-
-    def __init__(self, num_units, forget_bias=1.0, input_size=None, activation=tf.tanh, reuse=None):
-        #super(TreeLSTMCell, self).__init__(_reuse=reuse)
-        self._num_units = num_units
-        self._forget_bias = forget_bias
-        self._activation = activation
-
-        # TODO: get _linear equivalent to work
-
-        # XXX XXX initializers??
-        self.W_i = tf.get_variable("W_i", [num_units, num_units], dtype=data_type())
-        self.U_i = tf.get_variable("U_i", [num_units, num_units], dtype=data_type())
-        self.b_i = tf.get_variable("b_i", [1, num_units], dtype=data_type())
-
-        self.W_f = tf.get_variable("W_f", [num_units, num_units], dtype=data_type())
-        self.U_f = tf.get_variable("U_f", [num_units, num_units], dtype=data_type())
-        self.b_f = tf.get_variable("b_f", [1, num_units], dtype=data_type())
-
-        self.W_o = tf.get_variable("W_o", [num_units, num_units], dtype=data_type())
-        self.U_o = tf.get_variable("U_o", [num_units, num_units], dtype=data_type())
-        self.b_o = tf.get_variable("b_o", [1, num_units], dtype=data_type())
-
-        self.W_u = tf.get_variable("W_u", [num_units, num_units], dtype=data_type())
-        self.U_u = tf.get_variable("U_u", [num_units, num_units], dtype=data_type())
-        self.b_u = tf.get_variable("b_u", [1, num_units], dtype=data_type())
-
-    def zero_state(self, batch_size, data_type):
-        return tf.contrib.rnn.LSTMStateTuple(tf.zeros([batch_size, self._num_units], dtype=data_type),
-                tf.zeros([batch_size, self._num_units], dtype=data_type))
-
-    @property
-    def state_size(self):
-        return tf.contrib.rnn.LSTMStateTuple(self._num_units, self._num_units)
-
-    @property
-    def output_size(self):
-        return self._num_units
-
-
-    def __call__(self, inputs, state, scope=None):
-        with tf.variable_scope(scope or type(self).__name__):
-
-            current_inputs, parent_inputs = tf.unstack(inputs)
-            f, h = state
-
-            i = tf.sigmoid(tf.matmul(current_inputs, self.W_i) + tf.matmul(h, self.U_i) + self.b_i)
-            o = tf.sigmoid(tf.matmul(current_inputs, self.W_o) + tf.matmul(h, self.U_o) + self.b_o)
-            u = self._activation(tf.matmul(current_inputs, self.W_u) + tf.matmul(h, self.U_u) + self.b_u)
-
-            new_c = f + i * u
-            new_h = self._activation(new_c) * o
-
-            # XXX double bias?????
-            new_f = tf.sigmoid(tf.matmul(parent_inputs, self.W_f) +
-                               tf.matmul(new_h, self.U_f) +
-                               self.b_f) * new_c
-
-            new_state = tf.contrib.rnn.LSTMStateTuple(new_f, new_h)
-            return new_h, new_state
-
+    return tf.float32
 
 class TRNNModel(object):
 
-    def embed(self, index, dependency):
-        with tf.variable_scope('Parameters', reuse=True):
-            with tf.device("/cpu:0"):
-                label_embedding = tf.get_variable(
-                    "label_embedding", [self.label_size, self.size], dtype=data_type())
-                # XXX currently not using this!!
-                attr_embedding = tf.get_variable(
-                    "attr_embedding", [self.attr_size, self.size / 2], dtype=data_type())
-
-        if dependency == None:
-            label_index = 0
-            attr_index = 0
-        else:
-            label_index = tf.cond(self.placeholders['is_inference'],
-                                  lambda: self.placeholders['inference'][dependency]['label'],
-                                  lambda: tf.gather(self.placeholders['data']['label_index'], index,
-                                      name="LabelIndexGather"))
-
-            attr_index = tf.cond(self.placeholders['is_inference'],
-                                  lambda: self.placeholders['inference'][dependency]['attr'],
-                                  lambda: tf.gather(self.placeholders['data']['attr_index'], index,
-                                      name="AttrIndexGather"))
-        node_label_embedding = tf.gather(label_embedding, label_index,
-                                            name="LabelEmbedGather")
-        node_attr_embedding = tf.gather(attr_embedding, attr_index,
-                                        name="AttrEmbedGather")
-        node_embedding = node_label_embedding#tf.concat([node_label_embedding, node_attr_embedding], 0)
-        return tf.expand_dims(node_embedding, 0)
-
-    def __init__(self, is_training, config):
-        self.size = size = config['hidden_size']
-        self.label_size = label_size = config['label_vocab_size']
-        self.attr_size = attr_size = config['attr_vocab_size']
-        self.dependencies = config['dependencies']
-        num_layers = config['num_layers']
-
-        # declare a bunch of parameters that will be reused later
-        with tf.variable_scope('Parameters'):
-            # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
-            for dependency in self.dependencies:
-                tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
-
-            tf.get_variable('u_last', [size], dtype=tf.float32)
-            tf.get_variable('u_first', [size], dtype=tf.float32)
-
-            tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
-            tf.get_variable("attr_b", [attr_size], dtype=data_type())
-            tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
-
-            tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
-            tf.get_variable("softmax_b", [label_size], dtype=data_type())
-
-            tf.get_variable("v_first", [label_size], dtype=data_type())
-            tf.get_variable("v_last", [label_size], dtype=data_type())
-
-            with tf.device("/cpu:0"):
-                tf.get_variable("label_embedding", [self.label_size, self.size], dtype=data_type())
-                # XXX currently not using this!!
-                tf.get_variable("attr_embedding", [self.attr_size, self.size / 2], dtype=data_type())
-
-        def lstm_cell(is_tree):
-            if is_tree:
-                return TreeLSTMCell(size, forget_bias=0.0, reuse=tf.get_variable_scope().reuse)
+    def output_tensor_names(self):
+        def extract_names(d):
+            if isinstance(d, dict):
+                out = {}
+                for k in d: out[k] = extract_names(d[k])
+                return out
+            elif isinstance(d, list):
+                x = [extract_names(i) for i in d]
+                if len(x) == 1:
+                    x = x[0]
+                return x
+            elif isinstance(d, tf.contrib.rnn.LSTMStateTuple):
+                return {
+                    'c': d.c.name,
+                    'h': d.h.name
+                }
+            elif isinstance(d, tf.TensorArray):
+                return d.stack().name
             else:
-                return tf.contrib.rnn.BasicLSTMCell(
-                    size, forget_bias=0.0, state_is_tuple=True,
-                    reuse=tf.get_variable_scope().reuse)
-        attn_cell = lstm_cell
-        if is_training and config['keep_prob'] < 1:
-          def attn_cell(is_tree):
-            return tf.contrib.rnn.DropoutWrapper(
-                lstm_cell(is_tree), output_keep_prob=config['keep_prob'])
+                assert(isinstance(d, tf.Tensor) or isinstance(d, tf.Operation))
+                return d.name
 
-        self.placeholders = { 'data': {}, 'inference': {} }
-        for k in config['placeholders']['data']:
-            self.placeholders['data'][k] = tf.placeholder(tf.int32, [None], name=k+'_placeholder')
-
-        # XXX XXX XXX better way of doing this? Basically, when doing inference, we want to be able to have different nodes
-        # for each dependency, but we only use the Initial States as a place to write, which all are
-        # associated with node 0
-
-        self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
-        for k in possible_dependencies:
-            self.placeholders['inference'][k] = {
-                'attr' : tf.placeholder(tf.int32, [], name='inference_' + k + '_attr_placeholder'),
-                'label' : tf.placeholder(tf.int32, [], name='inference_' + k + '_label_placeholder')
-            }
-        self.placeholders['inference']['self'] = {
-            'attr' : tf.placeholder(tf.int32, [], name='inference_self_attr_placeholder'),
-            'label' : tf.placeholder(tf.int32, [], name='inference_self_label_placeholder')
+        return {
+            'placeholders': extract_names(self.placeholders),
+            'ops': extract_names(self.ops),
+            'fetches' : extract_names(self.fetches)
         }
 
-        total_data = tf.squeeze(tf.shape(self.placeholders['data']['is_leaf']))
+    def collect_directional_logits(self, direction, h_pred, right_hole_h_pred):
+        size = self.config['hidden_size']
+        label_size = self.config['label_size']
+        attr_size = self.config['attr_size']
 
-        self.dependency_initial_states = dict()
-        self.dependency_initial_outputs = dict()
-        self.dependency_cells = dict()
+        logits = {}
+        labels = {}
 
-        # dependency_states can't be a dictionary on sibling/parent, since it needs to be convertible to a tensor (required
-        # for the tf.while_loop). The first index in dependency_states is thus aligned with the dependency in the
-        # dependencies array
-        dependency_states = []
-        dependency_outputs = []
-
-
-        for i in range(len(self.dependencies)):
-            dependency = self.dependencies[i]
-
-            self.dependency_cells[dependency] = []
-            self.dependency_initial_states[dependency] = []
-            self.dependency_initial_outputs[dependency] = []
-            for j in range(num_layers):
-                with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j)):
-                    self.dependency_cells[dependency].append(attn_cell(dependency == 'children'))
-                    self.dependency_initial_states[dependency].append(self.dependency_cells[dependency][j].zero_state(1, data_type()))
-
-            # Need to manually handle LSTM states. This is gross.
-            dependency_states.append(init_lstm_array(num_layers, total_data, size))
-            dependency_outputs.append([])
-            for j in range(num_layers):
-                dependency_outputs[-1].append(init_tensor_array(total_data, size))
-
-            # since we only use the TensorArray below, write the initial state in position 0. children needs to write
-            # final output there, though
-            self.initial_leaf_input = self.embed(0, self.dependencies[i])
-            cur_input = self.initial_leaf_input
-            for j in range(num_layers):
-                # the second cur_input doesn't do anything -- it's just to get the output from the TreeLSTM
-                # XXX could this one (for leaves) just be a regular LSTM instead of a TreeLSTM?
-                cur_input = cur_input if dependency != 'children' else tf.stack([cur_input, cur_input])
-                # need to use tf.AUTO_REUSE, since the first time we call an LSTM cell it uses new variables
-                with tf.variable_scope("RNN_{}_cell_{}".format(dependency,j), reuse=tf.AUTO_REUSE):
-                    (cur_input, next_state) = self.dependency_cells[dependency][j](cur_input,
-                                                    self.dependency_initial_states[dependency][j])
-                self.dependency_initial_outputs[dependency].append(cur_input)
-                dependency_outputs[i][j] = dependency_outputs[i][j].write(0,
-                                                self.dependency_initial_outputs[dependency][j])
-                if dependency != 'children':
-                    dependency_states[i][j] = save_lstm_state(dependency_states[i][j],
-                                                                self.dependency_initial_states[dependency][j], 0)
-        # extra TensorArrays for children, hurray!!
-        children_predictor_states = init_lstm_array(num_layers, total_data, size)
-        children_tmp_states = init_lstm_array(num_layers, total_data, size)
-        children_output = init_tensor_array(total_data, size)
-
-        self.initial_children_tmp_states = []
-
-        # separate RNN just to predict a parent label given children embedding sequence
-        with tf.variable_scope("Children_RNN", reuse=tf.AUTO_REUSE):
-            self.children_predictor = tf.contrib.rnn.MultiRNNCell(
-                    [attn_cell(False) for i in range(num_layers)], state_is_tuple=True)
-
-        # TODO: split embedding size from hidden layer size
-        # XXX Is this right?
-        self.children_predictor_initial_states = self.children_predictor.zero_state(1, data_type())
-        children_predictor_states = save_multi_lstm_state(children_predictor_states,
-                                                          self.children_predictor_initial_states, 0)
-        if 'children' in self.dependencies:
-            for j in range(num_layers):
-                self.initial_children_tmp_states.append(self.dependency_cells['children'][j].zero_state(1, data_type()))
-            (init_output, next_state) = self.children_predictor(self.dependency_initial_outputs['children'][num_layers-1],
-                                        self.children_predictor_initial_states)
-            self.initial_children_predictor_output = init_output
-        else:
-            for j in range(num_layers):
-                self.initial_children_tmp_states.append(self.dependency_cells[self.dependencies[0]][j].zero_state(1, data_type()))
-            self.initial_children_predictor_output = tf.constant(0)
-
-
-
-
-        # TODO: dropout??
-        #if is_training and config['keep_prob'] < 1:
-        #  inputs = tf.nn.dropout(inputs, config['keep_prob'])
-
-        # this returns true as long as the loop counter is less than the length of the example
-        def loop_cond_wrapper(direction):
-            def loop_cond (loss, ctr, h_pred, dependency_states, dependency_outputs,
-                           children_tmp_states, children_output, children_predictor_states,
-                           label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
-                if direction == 'forward':
-                    return tf.less(ctr, total_data)
-                else:
-                    return tf.greater(ctr, 0)
-            return loop_cond
-
-        def loop_body_wrapper(direction, do_loss, layer):
-            def loop_body(loss, ctr, h_pred, dependency_states, dependency_outputs,
-                          children_tmp_states, children_output, children_predictor_states,
-                          label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last):
-
-                is_leaf = tf.cast(tf.gather(self.placeholders['data']['is_leaf'], ctr, name="IsLeafGather"), tf.float32)
-                first_sibling = tf.cast(tf.gather(self.placeholders['data']['first_sibling'], ctr), tf.float32)
-                last_sibling = tf.cast(tf.gather(self.placeholders['data']['last_sibling'], ctr, name="LastSiblingGather"), tf.float32)
-                label_index = tf.gather(self.placeholders['data']['label_index'], ctr, name="NodeIndexGather")
-                attr_index = tf.gather(self.placeholders['data']['attr_index'], ctr, name="AttrIndexGather")
-                parent = tf.gather(self.placeholders['data']['parent'], ctr)
-                left_sibling = tf.gather(self.placeholders['data']['left_sibling'], ctr)
-                right_sibling = tf.gather(self.placeholders['data']['right_sibling'], ctr)
-                #num_children = tf.cast(tf.gather(self.placeholders['data']['num_children'], ctr,
-                #                                 name="AttrIndexGather"), tf.float32)
-                h_pred_ctr = tf.squeeze(tf.gather(h_pred, [ctr]))
-
-                # Generate both the sibling and parent RNN states for the current node, based on the previous sibling and parent
-                for i in range(len(self.dependencies)):
-                    dependency = self.dependencies[i]
-                    if possible_dependencies[dependency] != direction:
-                        continue
-                    # During inference, we want to use the directly-supplied label for the parent, since each node is passed in
-                    # one-by-one and we won't have access to the parent when the child is passed in. During training, we have
-                    # all nodes in the example at once, so can directly grab the parent's label
-                    dependency_node = tf.cond(self.placeholders['is_inference'],
-                                              lambda: 0,
-                                              lambda: tf.gather(self.placeholders['data'][dependency], ctr,
-                                                  name=(dependency+"Gather")) if dependency != 'children' else 0)
-
-                    node_embedding = self.embed(ctr, 'self')
-
-                    if layer == 0:
-                        inp = node_embedding
-                    else:
-                        old_output = dependency_outputs[i][layer-1].read(ctr)
-                        inp = old_output
-
-                    if dependency != 'children':
-                        # reconstruct the LSTM state of the parent/sibling from the TensorArray
-                        state = restore_lstm_state(dependency_states[i][layer], dependency_node)
-
-                        with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer)):
-                            (output, new_state) = self.dependency_cells[dependency][layer](inp, state)
-
-                        dependency_states[i][layer] = save_lstm_state(dependency_states[i][layer], new_state, ctr)
-                        dependency_outputs[i][layer] = dependency_outputs[i][layer].write(ctr, output)
-
-                    else:
-                        def infer(index):
-                            return tf.cond(self.placeholders['is_inference'], lambda: 0, lambda: index)
-
-                        if layer == 0:
-                            leaf_embedding = self.initial_leaf_input
-                            parent_embedding = self.embed(parent, 'parent')
-                        else:
-                            leaf_embedding = self.dependency_initial_outputs['children'][layer-1]
-                            parent_embedding = tf.cond(self.placeholders['is_inference'],
-                                    lambda: dependency_outputs[i][layer-1].read(infer(parent)),
-                                    lambda: dependency_outputs[i][layer-1].read(parent))
-
-                        bootstrap_leaf = lambda: \
-                            (self.dependency_cells['children'][layer](
-                                tf.stack([leaf_embedding, inp]),
-                                self.dependency_initial_states['children'][layer])[1],
-                             children_output if layer != num_layers - 1 else \
-                                children_output.write(ctr, self.initial_children_predictor_output))
-
-                        bootstrap_inference_else = lambda: (self.dependency_initial_states['children'][layer],
-                             children_output if layer != num_layers - 1 else \
-                                children_output.write(ctr, self.initial_children_predictor_output))
-
-                        bootstrap_training_else = lambda: (restore_lstm_state(dependency_states[i][layer], ctr),
-                                children_output)
-                        bootstrap_else = lambda: tf.cond(self.placeholders['is_inference'],
-                                                          bootstrap_inference_else,
-                                                          bootstrap_training_else)
-
-                        state, children_output = tf.cond(tf.cast(is_leaf, tf.bool), bootstrap_leaf,
-                                                         bootstrap_else, strict=True)
-
-                        joint_embedding = tf.stack([inp, parent_embedding])
-                        with tf.variable_scope("RNN_{}_cell_{}".format(dependency,layer), reuse=True):
-                            (future_output, future_state) = self.dependency_cells['children'][layer](joint_embedding,
-                                                                                                     state)
-                        if layer == num_layers-1:
-                            # for now, ignore output of all but last (could eventually use with attention)?
-                            cp_state = restore_multi_lstm_state(children_predictor_states, num_layers,
-                                                                infer(right_sibling))
-
-                            with tf.variable_scope("Children_RNN", reuse=True):
-                                (cp_output, next_cp_state) = self.children_predictor(future_output, cp_state)
-                            children_predictor_states = save_multi_lstm_state(children_predictor_states,
-                                                                              next_cp_state, ctr)
-
-                            # if we are the left-most sibling, write the output of the RNN to the parent
-                            handle_first = lambda: children_output.write(infer(parent), cp_output)
-                            handle_not_first = lambda: children_output
-                            children_output = tf.cond(tf.cast(left_sibling, tf.bool),
-                                                        handle_not_first,
-                                                        handle_first)
-
-
-                        # this is basically doing a +=. If we are the last sibling (on the right), we need to start
-                        # from 0. If we are the first sibling (on the left), we need to write the sum to the parent
-                        dependency_outputs[i][layer] = dependency_outputs[i][layer].write(ctr, future_output)
-
-                        # update state
-
-
-                        children_tmp_states[layer] = tf.cond(self.placeholders['is_inference'],
-                                        lambda: save_lstm_state(children_tmp_states[layer],
-                                                                self.initial_children_tmp_states[layer], ctr),
-                                        lambda: children_tmp_states[layer])
-
-                        handle_last = lambda: future_state
-                        handle_not_last = lambda: restore_lstm_state(children_tmp_states[layer], ctr,
-                                                                     add_state=future_state)
-
-                        new_state = tf.cond(tf.cast(right_sibling, tf.bool),
-                                            handle_not_last, handle_last, strict=True)
-
-                        parent_index = tf.cond(self.placeholders['is_inference'], lambda: 0, lambda: parent)
-                        left_sibling_index = tf.cond(self.placeholders['is_inference'], lambda: 0, lambda: left_sibling)
-                        # save to parent
-                        handle_first = lambda: (children_tmp_states[layer],
-                                                save_lstm_state(dependency_states[i][layer], new_state,
-                                                                infer(parent_index)))
-                        # save to sibling
-                        handle_not_first = lambda: (save_lstm_state(children_tmp_states[layer], new_state,
-                                                                    infer(left_sibling_index)),
-                                                    dependency_states[i][layer])
-                        children_tmp_states[layer], dependency_states[i][layer] = \
-                                tf.cond(tf.cast(left_sibling, tf.bool), handle_not_first, handle_first)
-
-                    if layer == num_layers - 1:
-                        with tf.variable_scope('Parameters', reuse=True):
-                            U_dependency = tf.get_variable('U_' + dependency, [size, size], dtype=tf.float32)
-                        predicted_output = dependency_outputs[i][layer].read(dependency_node) \
-                                           if dependency != 'children' else children_output.read(ctr)
-
-                        h_pred_ctr += tf.matmul(predicted_output, U_dependency)
-
-
-                if layer == num_layers - 1:
-                    # only calculate loss after we handle both directions
-                    if do_loss:
-                        loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
-                                self.calculate_loss(loss, h_pred_ctr, label_index, attr_index,
-                                                    first_sibling, last_sibling)
-                    else:
-                        h_pred = tf.concat(axis=0, values=[h_pred[:ctr,:,:], [h_pred_ctr], h_pred[ctr+1:,:,:]])
-
-
-                #ctr = tf.Print(ctr, [ctr, layer])
-                ctr = tf.add(ctr, 1) if direction == 'forward' else tf.subtract(ctr, 1)
-
-
-                return loss, ctr, h_pred, dependency_states, dependency_outputs, \
-                       children_tmp_states, children_output, children_predictor_states, \
-                       label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
-            return loop_body
-
-        directions = set()
-        for k in self.dependencies:
-            directions.add(possible_dependencies[k])
-
-        loss = 0.0
-        # tensor array vs regular array??
-        h_pred = tf.zeros([total_data, 1, size])
-
-        #h_pred = tf.TensorArray(
-        #    tf.float32,
-        #    size=0,
-        #    dynamic_size=True,
-        #    clear_after_read=False,
-        #    infer_shape=)
-        for layer in range(num_layers):
-            loops = 0
-            for direction in directions:
-                loops += 1
-
-                # forward starts iterating from 1, since 0 is the "empty" parent/sibling
-                ctr = 1 if direction == 'forward' else total_data - 1
-                # The last 3 arguments we need to "return" from the while loop, so that inference can use them directly
-                # XXX the last three args are just there because we need a tensor of the correct size. better way?
-                loss, ctr, h_pred, dependency_states, dependency_outputs, \
-                      children_tmp_states, children_output, children_predictor_states, \
-                      label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last = \
-                    tf.while_loop(loop_cond_wrapper(direction), loop_body_wrapper(direction, loops == len(directions) and layer == num_layers - 1, layer),
-                                [loss,
-                                ctr,
-                                h_pred,
-                                dependency_states,
-                                dependency_outputs,
-                                children_tmp_states,
-                                children_output,
-                                children_predictor_states,
-                                tf.zeros([1,label_size], tf.float32), # label_probabilities
-                                tf.zeros([1,attr_size], tf.float32), # attr_probabilities
-                                0.0, 0.0], # predicted_p_{first/last}
-                                parallel_iterations=1)
-
-        self._cost = cost = tf.reduce_sum(loss)
-
-
-        # tensors we might want to have access to during inference
-        self.fetches = {
-            'cost': self._cost.name,
-            'predicted_p_first': predicted_p_first.name,
-            'predicted_p_last': predicted_p_last.name,
-            'label_probabilities': label_probabilities.name,
-            'attr_probabilities': attr_probabilities.name,
-            'states': {},
-            'outputs': {},
-            'children_tmp_states': [],
-            'children_predictor_states': [],
-            'children_output': children_output.read(0).name
-        }
-        for i in range(len(self.dependencies)):
-            dep = self.dependencies[i]
-            self.fetches['states'][dep] = []
-            self.fetches['outputs'][dep] = []
-            position = 1 if dep != 'children' else 0
-            for j in range(num_layers):
-                # for inference, we only care about the "root" node's state
-                # children will end up writing the result to the parent
-                self.fetches['states'][dep].append({
-                    'c': dependency_states[i][j][0].read(position).name,
-                    'h': dependency_states[i][j][1].read(position).name,
-                })
-                self.fetches['outputs'][dep].append(
-                    # this is the only one that children also writes into position 1
-                    dependency_outputs[i][j].read(1).name
-                )
-        if 'children' in self.dependencies:
-            self.fetches['children_output'] = children_output.read(position).name
-            self.fetches['children_tmp_states'] = []
-            self.fetches['children_predictor_states'] = []
-            for j in range(num_layers):
-                self.fetches['children_tmp_states'].append({
-                    'c': children_tmp_states[j][0].read(position).name,
-                    'h': children_tmp_states[j][1].read(position).name,
-                })
-                self.fetches['children_predictor_states'].append({
-                    'c': children_predictor_states[j][0].read(1).name,
-                    'h': children_predictor_states[j][1].read(1).name,
-                })
-
-        # Record the names of the LSTM states, so later when we want to do inference we can use them in
-        # the feed_dict
-        self.feed = {
-            'states': {},
-            'outputs': {},
-            'children_predictor_states': [],
-            'children_predictor_output': self.initial_children_predictor_output.name,
-            'leaf_input': self.initial_leaf_input.name,
-            'children_tmp_states': [],
-        }
-        for i in range(len(self.dependencies)):
-            dependency = self.dependencies[i]
-            self.feed['states'][dependency] = []
-            self.feed['outputs'][dependency] = []
-            # save this so we can manipulate the initial state when trying to perform inference
-            for j, (c, h) in enumerate(self.dependency_initial_states[dependency]):
-                self.feed['states'][dependency].append({
-                    'c': self.dependency_initial_states[dependency][j].c.name,
-                    'h': self.dependency_initial_states[dependency][j].h.name
-                })
-                self.feed['outputs'][dependency].append(
-                    self.dependency_initial_outputs[dependency][j].name
-                )
-        for j, (c, h) in enumerate(self.children_predictor_initial_states):
-            self.feed['children_predictor_states'].append({
-                'c': self.children_predictor_initial_states[j].c.name,
-                'h': self.children_predictor_initial_states[j].h.name,
-            })
-            self.feed['children_tmp_states'].append({
-                'c': self.initial_children_tmp_states[j].c.name,
-                'h': self.initial_children_tmp_states[j].h.name,
-            })
-
-        if not is_training:
-          return
-
-        self._lr = tf.Variable(0.0, trainable=False)
-        tvars = tf.trainable_variables()
-        grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
-                                          config['max_grad_norm'])
-        optimizer = tf.train.GradientDescentOptimizer(self._lr)
-        self._train_op = optimizer.apply_gradients(
-            zip(grads, tvars),
-            global_step=tf.train.get_or_create_global_step())
-
-        self._new_lr = tf.placeholder(
-            tf.float32, shape=[], name="new_learning_rate")
-        self._lr_update = tf.assign(self._lr, self._new_lr)
-
-
-    def calculate_loss(self, loss, h_pred, label_index, attr_index, first_sibling, last_sibling):
-        size = self.size
-        label_size = self.label_size
-        attr_size = self.attr_size
+        # tiles a parameter matrix/vector for matmul on a whole batch
+        def tile(matrix):
+            tiled_matrix = tf.tile(tf.reshape(matrix, [-1]), [tf.shape(h_pred)[0]])
+            return tf.reshape(tiled_matrix, [tf.shape(h_pred)[0], tf.shape(matrix)[0], tf.shape(matrix)[1]])
 
         # grab all of the projection paramaters, now that we have the current node's LSTM state
-        with tf.variable_scope('Parameters', reuse=True):
-            u_last = tf.get_variable('u_last', [size], dtype=tf.float32)
-            u_first = tf.get_variable('u_first', [size], dtype=tf.float32)
+        with tf.variable_scope("Parameters/{}".format(direction), reuse=True):
+            u_end = tf.get_variable('u_end', [size], dtype=data_type())
 
             attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
             attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
             v_attr = tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
 
-            softmax_w = tf.get_variable("softmax_w", [size, label_size], dtype=data_type())
-            softmax_b = tf.get_variable("softmax_b", [label_size], dtype=data_type())
+            label_w = tf.get_variable("label_w", [size, label_size], dtype=data_type())
+            label_b = tf.get_variable("label_b", [label_size], dtype=data_type())
 
-            v_first = tf.get_variable("v_first", [label_size], dtype=data_type())
-            v_last = tf.get_variable("v_last", [label_size], dtype=data_type())
+            if direction == 'reverse':
+                u_right_hole = tf.get_variable('u_right_hole', [size * 2], dtype=data_type())
+
+        # this is the only loss here that linear uses
+        logits['label'] = tf.matmul(h_pred, tile(label_w)) + label_b
+        labels['label'] = self.rows['label_index']
+
+        if self.config['model'] == 'ast':
+            # loss for whether we are the last sibling on the left or right
+            labels[direction]['end'] = tf.cast(self.rows['last_sibling' if direction == 'forward'
+                                                                else 'first_sibling'], data_type())
+            logits['end'] = tf.reduce_sum(tf.multiply(u_end, h_pred), axis=0)
+
+            #right_hole_h_pred = tf.Print(right_hole_h_pred, [right_hole, right_sibling, right_hole_h_pred])
+            #if direction == 'reverse':
+            #    #right_sibling = self.rows['right_sibling']
+            #    #right_hole = self.rows['right_hole']
+            #    #logits_right_hole = tf.reduce_sum(tf.multiply(u_end, tf.concat([h_pred, right_hole_h_pred], 0)))
+            #    #predicted_right_hole = tf.sigmoid(logits_right_hole)
+            #    #actual_right_hole = tf.cast(right_hole == right_sibling, data_type())
+            #    ## TODO: paper uses sigmoid. How does this compare to cross entropy?
+            #    #loss_right_hole = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_right_hole, labels=actual_right_hole, name="right_hole_loss")
+            #    loss_right_hole = tf.constant(0.0)
+            #if direction == 'reverse':
+            #    loss = tf.cond(tf.cast(right_hole, tf.bool),
+            #            lambda: loss + loss_right_hole, lambda: loss)
+            #    predicted_right_hole = tf.constant(0.0)
+            #else:
+            #    predicted_right_hole = tf.constant(0.0)
+
+            actual_label = tf.one_hot(self.rows['label_index'], label_size)
+            logits['attr'] = tf.matmul(h_pred, tile(attr_w)) + attr_b + tf.matmul(actual_label, tile(attr_v))
+            labels['attr'] = self.rows['attr_index']
+
+        return labels, logits
+
+    def collect_joint_logits(self, h_pred_ctr, loss):
+        #labels = {'joint':{}}
+        #logits = {'joint':{}}
+
+        #for k in loss['forward']:
+        #    if k != 'label': continue
+        #    label_size = self.config['label_size']
+        #    actual_label = tf.one_hot(self.rows['label_index'], label_size, axis=2)
+        #    forward = tf.multiply(loss['forward'][k]['probabilities'], actual_label)
+        #    forward = tf.reduce_sum(forward, axis=2)
+        #    reverse = tf.multiply(loss['reverse'][k]['probabilities'], actual_label)
+        #    reverse = tf.reduce_sum(reverse, axis=2)
+
+        #with tf.variable_scope("Parameters/joint", reuse=True):
+        #    u_alpha = tf.get_variable("u_alpha", [self.config['hidden_size'] * 2], dtype=data_type())
+
+        #labels['joint']['alpha'] = forward / (forward + reverse)
+        #logits['joint']['alpha'] = tf.reduce_sum(tf.multiply(u_alpha, tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse']], axis=2)), axis=2)
+
+        #logits['joint']['alpha'] = tf.Print(logits['joint']['alpha'], [tf.shape(labels['joint']['alpha']), tf.shape(logits['joint']['alpha'])])
+
+        #return labels, logits
+        label_size = self.config['label_size']
+        actual_label = tf.one_hot(self.rows['label_index'], label_size, axis=2)
+        forward = tf.multiply(loss['forward']['label']['probabilities'], actual_label)
+        forward = tf.reduce_sum(forward, axis=2)
+        reverse = tf.multiply(loss['reverse']['label']['probabilities'], actual_label)
+        reverse = tf.reduce_sum(reverse, axis=2)
+        forward = tf.Print(forward, [tf.shape(forward), tf.shape(reverse)])
+
+        with tf.variable_scope("Parameters/joint", reuse=True):
+            u_alpha = tf.get_variable("u_alpha", [self.config['hidden_size'] * 2], dtype=data_type())
+
+        labels = forward / (forward + reverse)
+        logits = tf.reduce_sum(tf.multiply(u_alpha, tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse']], axis=2)), axis=2)
+        logits = tf.Print(logits, [tf.shape(labels), tf.shape(logits)])
+
+        #logits['joint']['alpha'] = tf.Print(logits['joint']['alpha'], [tf.shape(labels['joint']['alpha']), tf.shape(logits['joint']['alpha'])])
+        mask = tf.cast(self.rows['mask'], tf.float32)
+        num_tokens = tf.reduce_sum(mask)
+        loss['joint'] = {'label': {}}
+        loss['joint']['label']['loss'] = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits)  * mask) / num_tokens
+        loss['joint']['label']['probabilities'] = tf.nn.sigmoid(logits)
+
+        scope = tf.contrib.framework.get_name_scope()
+        if scope != '':
+            scope += '/'
+        tvars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "{}Parameters/{}".format(scope, 'joint'))
+        grads, _ = tf.clip_by_global_norm(tf.gradients(loss['joint']['label']['probabilities'], tvars), self.config['max_grad_norm'])
+        train_vars = zip(grads, tvars)
+
+        return loss, train_vars
+
+    def calculate_loss_and_tvars(self, labels, logits):
+        loss = {}
+        train_vars = []
+        mask = tf.cast(self.rows['mask'], tf.float32)
+        num_tokens = tf.reduce_sum(mask)
+        for subset in labels:
+            loss[subset] = {}
+            total_loss = 0.0
+            for k in labels[subset]:
+                log, lab = logits[subset][k], labels[subset][k]
+                cross, predict = (tf.nn.sigmoid_cross_entropy_with_logits, tf.nn.sigmoid) if tf.rank(log) == 3 \
+                                 else (tf.nn.sparse_softmax_cross_entropy_with_logits, tf.nn.softmax)
+                #log, lab = logits[subset][k], labels[subset][k]
+                #cross, predict = (tf.nn.sigmoid_cross_entropy_with_logits, tf.nn.sigmoid) if tf.rank(log) == 3 \
+                #                 else (tf.nn.sparse_softmax_cross_entropy_with_logits, tf.nn.softmax)
+                #loss[subset][k] = {
+                #    'probabilities': predict(log),
+                #    'loss': tf.reduce_sum(cross(labels=lab, logits=log) * mask)
+                #}
+                #total_loss += loss[subset][k]['loss']
+                #loss[subset][k]['loss'] /= num_tokens
+                if subset == 'joint':
+                    cross = tf.nn.softmax_cross_entropy_with_logits
+                loss[subset][k] = {
+                    'probabilities': predict(log),
+                    'loss': tf.reduce_sum(cross(labels=lab, logits=log) * mask) / num_tokens
+                }
+                #if tf.rank(log) == 3:
+                #    print('ugh')
+                #    loss[subset][k]['loss'] = tf.reduce_sum(loss[subset][k]['loss'], axis=2)
+                #reduced_loss = tf.reduce_sum(loss[subset][k]['loss'] * mask)
+                #loss[subset][k]['reduced_loss'] = reduced_loss / num_tokens
+                total_loss += loss[subset][k]['loss']
+                #loss[subset][k]['loss'] = tf.Print(loss[subset][k]['loss'], [loss[subset][k]['loss']])
+                #loss[subset][k]['loss'] /= num_tokens
+            # only update the subset of weights relevant to these losses
+
+            # grab the current scope, in case the model was instantiated within a scope
+            scope = tf.contrib.framework.get_name_scope()
+            if scope != '':
+                scope += '/'
+            tvars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "{}Parameters/{}".format(scope, subset))
+            grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), self.config['max_grad_norm'])
+            train_vars.extend(zip(grads, tvars))
+        return loss, train_vars
+
+    def embed(self, index, dependency):
+       #     label_index = tf.zeros([self.batch_size], dtype=tf.int32)
+       #     attr_index = tf.zeros([self.batch_size], dtype=tf.int32)
+       # else:
+       #     #label_index = tf.cond(self.placeholders['is_inference'],
+       #     #                      lambda: self.placeholders['inference'][dependency]['label'],
+       #     #                      lambda: tf.gather(self.rows['label_index'], index, axis=1,
+       #     #                          name="LabelIndexGather"))
+
+       #     #attr_index = tf.cond(self.placeholders['is_inference'],
+       #     #                      lambda: self.placeholders['inference'][dependency]['attr'],
+       #     #                      lambda: tf.gather(self.rows['attr_index'], index, axis=1,
+       #     #                          name="AttrIndexGather"))
+       #     index = tf.one_hot(index, tf.shape(self.rows['label_index'])[1], on_value=True, off_value=False)
+       #     label_index = tf.boolean_mask(self.rows['label_index'], index)
+       #     attr_index = tf.boolean_mask(self.rows['attr_index'], index)
+
+        #if dependency == None:
+        #    label_index = [0]
+        #    attr_index = [0]
+        #else:
+            #label_index = tf.cond(self.placeholders['is_inference'],
+            #                      lambda: self.placeholders['inference'][dependency]['label'],
+            #                      lambda: tf.gather(self.rows['label_index'], index, axis=1,
+            #                          name="LabelIndexGather"))
+
+            #attr_index = tf.cond(self.placeholders['is_inference'],
+            #                      lambda: self.placeholders['inference'][dependency]['attr'],
+            #                      lambda: tf.gather(self.rows['attr_index'], index, axis=1,
+            #                          name="AttrIndexGather"))
+        label_index = tf.gather(self.rows['label_index'], index, axis=1)
+        attr_index = tf.gather(self.rows['attr_index'], index, axis=1)
+
+        #label_index.set_shape([None])
+        #attr_index.set_shape([None])
+        with tf.variable_scope('Parameters/{}'.format(self.config['dependencies'][dependency]), reuse=True):
+            label_embedding = tf.get_variable(
+                "label_embedding", [self.config['label_size'], self.config['embedding_size']], dtype=data_type())
+            # XXX currently not using this!!
+            attr_embedding = tf.get_variable(
+                "attr_embedding", [self.config['attr_size'], self.config['embedding_size']], dtype=data_type())
+        node_label_embedding = tf.gather(label_embedding, label_index, name="LabelEmbedGather")
+        node_attr_embedding = tf.gather(attr_embedding, attr_index, name="AttrEmbedGather")
+        node_embedding = node_label_embedding#tf.concat([node_label_embedding, node_attr_embedding], 0)
+        return node_embedding
+
+    def declare_params(self):
+        # declare a bunch of parameters that will be reused later. doesn't actually do anything
+        size = self.config['hidden_size']
+        label_size = self.config['label_size']
+        attr_size = self.config['attr_size']
+        embedding_size = self.config['embedding_size']
+
+        with tf.variable_scope('Parameters'):
+            with tf.variable_scope("joint"):
+                u_alpha = tf.get_variable("u_alpha", [size * 2], dtype=data_type())
+            for d in set(self.config['dependencies'].values()):
+                with tf.variable_scope(d):
+                    # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
+                    for i in self.config['dependencies']:
+                        if self.config['dependencies'][i] == d:
+                            tf.get_variable('U_' + i, [size, size], dtype=data_type())
+
+                    tf.get_variable('u_end', [size], dtype=data_type())
+
+                    tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
+                    tf.get_variable("attr_b", [attr_size], dtype=data_type())
+                    tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
+
+                    tf.get_variable("label_w", [size, label_size], dtype=data_type())
+                    tf.get_variable("label_b", [label_size], dtype=data_type())
+
+                    if d == 'reverse':
+                        tf.get_variable('u_right_hole', [size * 2], dtype=data_type())
+
+                    # should we have separate parameters for the forward and reverse directions?
+                    #with tf.device("/cpu:0"):
+                    tf.get_variable("label_embedding", [label_size, embedding_size], dtype=data_type())
+                    tf.get_variable("attr_embedding", [attr_size, embedding_size], dtype=data_type())
+
+    # this is the only other method that modifies "self"
+    def init_iterator(self):
+        feature = {}
+        shape = {}
+        for k in self.config['features']:
+            feature[k] = tf.int32
+            shape[k] = tf.TensorShape([None, None])
+        iterator = tf.data.Iterator.from_structure(feature, shape)
+
+        features = {}
+        shapes = {}
+        self.placeholders['features'] = {}
+        for k in self.config['features']:
+            features[k] = tf.FixedLenSequenceFeature([], tf.int64, allow_missing=True)
+            shapes[k] = [None] # the FixedLenSequence implies a second dimension, and batching gives the third
+            self.placeholders['features'][k] = tf.placeholder(tf.int32, shape=[None, None], name=k+'_placeholder')
+
+        # inference/node dataset
+        batch_size = tf.cast(self.batch_size, tf.int64)
+        dataset = tf.data.Dataset.from_tensor_slices(self.placeholders['features']).padded_batch(batch_size, shapes)
+        self.ops['node_iter'] = iterator.make_initializer(dataset)
+
+        # training/file dataset
+        def parse_function(example):
+            f = tf.parse_single_example(example, features)
+            for k in f:
+                f[k] = tf.cast(f[k], tf.int32)
+            return f
+        self.placeholders['filename'] = tf.placeholder(tf.string, [], name='filename_placeholder')
+        dataset = tf.data.TFRecordDataset(self.placeholders['filename'])
+        dataset = dataset.map(parse_function) \
+                         .cache() \
+                         .shuffle(buffer_size=100) \
+                         .repeat() \
+                         .padded_batch(batch_size, shapes)
+        self.ops['file_iter'] = iterator.make_initializer(dataset)
+
+        return iterator.get_next()
 
 
-        # predict where there is a sibling node (f = fraternal)
-        logits_p_last = tf.reduce_sum(tf.multiply(u_last, h_pred))
-        predicted_p_last = tf.sigmoid(logits_p_last)
-        logits_p_last = tf.expand_dims(logits_p_last, 0)
-        actual_p_last = tf.expand_dims(last_sibling, 0)
-        # TODO: paper uses sigmoid. How does this compare to cross entropy?
-        loss_p_last = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_last, labels=actual_p_last, name="p_last_loss")
+    def __init__(self, config):
+        self.config = config
 
-        logits_p_first = tf.reduce_sum(tf.multiply(u_first, h_pred))
-        predicted_p_first = tf.sigmoid(logits_p_first)
-        logits_p_first = tf.expand_dims(logits_p_first, 0)
-        actual_p_first = tf.expand_dims(first_sibling, 0)
-        # TODO: paper uses sigmoid. How does this compare to cross entropy?
-        loss_p_first = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits_p_first, labels=actual_p_first, name="p_first_loss")
+        self.placeholders = {}
+        self.fetches = { 'initial' : {}}
+        self.ops = {}
 
-        # XXX Testing shouldn't necessarily use is_leaf and last_sibling directly, according to paper?
-        # TODO: The paper doesn't seem to have a bias term. Could compare with and without
-        #label_logits = tf.matmul(h_pred, softmax_w) + softmax_b + tf.multiply(v_a, is_leaf) + tf.multiply(v_f, last_sibling)
-        label_logits = tf.matmul(h_pred, softmax_w) + softmax_b #+ tf.Print(tf.multiply(v_first, first_sibling), [tf.multiply(v_first, first_sibling)], "blah")
+        lr = tf.get_variable('lr', initializer=0.0, trainable=False)
+        self.placeholders['new_lr'] = new_lr = tf.placeholder(data_type(), shape=[], name="new_learning_rate")
+        self.ops['lr_update'] = tf.assign(lr, new_lr)
 
-        # XXX name things...
-        label_probabilities = tf.nn.softmax(label_logits)
-        actual_label = tf.one_hot(label_index, label_size)
-        # TODO: switch this to use sparse_softmax?
-        label_loss = tf.nn.softmax_cross_entropy_with_logits(logits=label_logits, labels=actual_label, name="label_loss")
+        self.batch_size = batch_size = tf.get_variable('batch_size', initializer=1, trainable=False, dtype=tf.int32)
+        self.placeholders['new_batch_size'] = new_batch_size = tf.placeholder(tf.int32, shape=[], name='new_batch_size')
+        self.ops['batch_size_update'] = tf.assign(batch_size, new_batch_size)
 
-        attr_logits = tf.matmul(h_pred, attr_w) + attr_b + tf.matmul(tf.expand_dims(actual_label, 0), v_attr)
-        attr_probabilities = tf.nn.softmax(attr_logits)
-        actual_attr = tf.one_hot(attr_index, attr_size)
-        attr_loss = tf.nn.softmax_cross_entropy_with_logits(logits=attr_logits, labels=actual_attr, name="attr_loss")
+        # map the dependencies to their relevant direction
+        self.directions = []
+        dependencies = {}
+        for d in config['dependencies']:
+            dependencies[d] = possible_dependencies[d]
+            if possible_dependencies[d] not in self.directions:
+                self.directions.append(possible_dependencies[d])
+        # TODO: this is the only place we modify "config" in here. We could just use "self", but
+        # then we still want to be able to propagate this information.
+        config['dependencies'] = dependencies
+        config['directions'] = self.directions
+
+        self.rows = rows = self.init_iterator()
 
 
-        # TODO: could differ the weights for structural predictions vs the label predictions when calculating loss
-        # XXX XXX XXX somehow only include the correct directions (like, forward direction shouldn't affect loss_p_first?)
-        loss = tf.add(loss, tf.reduce_sum(loss_p_last))
-        loss = tf.add(loss, tf.reduce_sum(loss_p_first))
-        loss = tf.add(loss, tf.reduce_sum(attr_loss))
-        loss = tf.add(loss, tf.reduce_sum(label_loss))
+        # does not always equal batch size, if we got a small batch
+        num_rows = tf.shape(rows['label_index'])[0]
 
-        return loss, label_probabilities, attr_probabilities, predicted_p_first, predicted_p_last
+        self.placeholders['drop_prob'] = tf.placeholder_with_default(0.0, shape=(), name='dropout_placeholder')
+        self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
 
-    def assign_lr(self, session, lr_value):
-        session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
+        num_layers = config['num_layers']
+        dependencies = config['dependencies']
+        embedding_size = config['embedding_size']
 
-    @property
-    def probabilities(self):
-        return self._probabilities
+        data_length = tf.shape(rows['label_index'])[1]
+        hidden_size = config['hidden_size']
 
-    @property
-    def initial_state(self):
-        return self._initial_state
+        self.declare_params()
 
-    @property
-    def cost(self):
-        return self._cost
+        cells = RNNTensorArrayCell(dependencies, data_length, hidden_size, num_rows, num_layers, data_type())
+        array = RNNTensorArrayCell.array
 
-    @property
-    def final_state(self):
-        return self._final_state
+        # extra TensorArrays for children, hurray!!
+        #self.fetches['children_predictor_states'] = children_predictor_states = array.init_lstm_array()
+        #self.fetches['children_tmp_states'] = children_tmp_states = array.init_lstm_array()
+        #self.fetches['children_output'] = children_output = array.init_tensor_array()
 
-    @property
-    def lr(self):
-        return self._lr
+        #self.fetches['initial']['children_tmp_states'] = initial_children_tmp_states = []
 
-    @property
-    def train_op(self):
-        return self._train_op
+        ## separate RNN just to predict a parent label given children embedding sequence
+        #with tf.variable_scope("Parameters/reverse"):
+        #    with tf.variable_scope("Children_RNN", reuse=tf.AUTO_REUSE):
+        #        children_predictor = tf.contrib.rnn.MultiRNNCell(
+        #                [self.rnn_cell(False) for i in range(num_layers)], state_is_tuple=True)
 
-
-def run_epoch(session, model, data, eval_op=None, verbose=False):
-    """Runs the model on the given data."""
-    start_time = time.time()
-    costs = 0.0
-    iters = 0
-
-    fetches = {
-        "cost": model.cost
-    }
-
-    if eval_op is not None:
-        fetches["eval_op"] = eval_op
-
-    epoch_size = len(data['is_leaf'])
-
-    for step in range(epoch_size):
-        feed_dict = { model.placeholders['is_inference']: False }
-
-        # TODO: some of these placeholders might be unused, if the data isn't used. can filter out
-        for k in data:
-            feed_dict[model.placeholders['data'][k]] = data[k][step]
-
-        # these aren't used if is_inference is False, but it seems we still need
-        # to feed them in evidently :-\
-        for k in model.placeholders['inference']:
-            feed_dict[model.placeholders['inference'][k]['label']] = 0
-            feed_dict[model.placeholders['inference'][k]['attr']] = 0
-
-        vals = session.run(fetches, feed_dict)
-        cost = vals["cost"]
-        print(cost)
-
-        costs += cost
-        iters += 1
-
-        #if verbose: #and step % (epoch_size // 10) == 10:
-        #  print("%.3f perplexity: %.3f speed: %.0f wps" %
-        #        (step * 1.0 / epoch_size, np.exp(costs / iters),
-        #         #iters * model.input.batch_size / (time.time() - start_time)))
-        #         iters / (time.time() - start_time)))
-
-    #return np.exp(costs / iters)
-    return costs
+        # XXX Is this right?
+        #children_predictor_initial_states = children_predictor.zero_state(1, data_type())
+        #array.save_multi_lstm_state(children_predictor_states, children_predictor_initial_states, 0)
+        #if 'children' in dependencies:
+        #    for j in range(num_layers):
+        #        initial_children_tmp_states.append(dependency_cells['children'][j].zero_state(1, data_type()))
+        #    (init_output, next_state) = children_predictor(dependency_initial_outputs['children'][num_layers-1],
+        #                                children_predictor_initial_states)
+        #    initial_children_predictor_output = init_output
+        #else:
+        #    for j in range(num_layers):
+        #        initial_children_tmp_states.append(dependency_cells[dependencies[0]][j].zero_state(1, data_type()))
+        #    initial_children_predictor_output = tf.constant(0)
 
 
-def get_config():
-    if FLAGS.model == "small":
-        return SmallConfig
-    elif FLAGS.model == "medium":
-        return MediumConfig
-    elif FLAGS.model == "large":
-        return LargeConfig
-    elif FLAGS.model == "test":
-        return TestConfig
-    else:
-        raise ValueError("Invalid model: %s", FLAGS.model)
+
+        # this returns true as long as the loop counter is less than the length of the example
+        def loop_cond_wrapper(dependency):
+            def loop_cond (ctr, cell_data, children_tmp_states, children_output, children_predictor_states):
+                if self.config['dependencies'][dependency] == 'forward':
+                    return tf.less(ctr, data_length)
+                else:
+                    return tf.greater(ctr, 0)
+            return loop_cond
+
+        def loop_body_wrapper(dependency, layer):
+            def loop_body(ctr, cell_data, children_tmp_states, children_output, children_predictor_states):
+                cells.data = cell_data
 
 
-def main(_):
-    # load in all the data
-    raw_data = dict()
-    with open(os.path.join(FLAGS.data_path, 'tree_train.json')) as f:
-        raw_data['train'] = json.load(f)
-    with open(os.path.join(FLAGS.data_path,'tree_valid.json')) as f:
-        raw_data['valid'] = json.load(f)
-    with open(os.path.join(FLAGS.data_path,'tree_test.json')) as f:
-        raw_data['test'] = json.load(f)
-    with open(os.path.join(FLAGS.data_path, 'tree_tokens.json')) as f:
-        token_ids = json.load(f)
-        raw_data['token_to_id'] = token_ids['ast_labels']
-        raw_data['attr_to_id'] = token_ids['label_attrs']
+                #def infer(index):
+                #    return tf.cond(self.placeholders['is_inference'], lambda: 0, lambda: index)
 
-    config = get_config()
-    config['label_vocab_size'] = len(raw_data['token_to_id'])
-    config['attr_vocab_size'] = len(raw_data['attr_to_id'])
+                # During inference, we want to use the directly-supplied label for the parent, since each node is passed in
+                # one-by-one and we won't have access to the parent when the child is passed in. During training, we have
+                # all nodes in the example at once, so can directly grab the parent's label
+                #dependency_node = infer(tf.gather(rows[dependency], ctr, axis=1,
+                #                        name=(dependency+"Gather")) if dependency != 'children' else 0)
 
-    config['possible_dependencies'] = possible_dependencies
-    config['dependencies'] = FLAGS.dependencies.split()
 
-    config['placeholders'] = {
-        'data': {},
-        'inference': {}
-    }
-    # this needs to be populated so model initialization can quickly create the appropriate placeholders
-    for k in raw_data['train']:
-        config['placeholders']['data'][k] = None
+                inp = self.embed(ctr, dependency) if layer == 0 \
+                      else cells.rnn[dependency][layer-1].get_output(cell_data, ctr)
+                state_source = dependency if dependency != 'children' else 'left_child'
+                dependency_idx = tf.gather(rows[state_source], ctr, axis=1, name=(i+"Gather"))
 
-    eval_config = config.copy()
-    #eval_config['batch_size'] = 1
-    #eval_config['num_steps'] = 1
+                if dependency != 'children':
+                    cells.rnn[dependency][layer].step(cell_data, ctr, inp, dependency_idx)
+                else:
+                    is_leaf = tf.cast(tf.gather(rows['is_leaf'], ctr, axis=1, name="IsLeafGather"), tf.bool)
+                    right_sibling = tf.cast(tf.gather(rows['right_sibling'], ctr, axis=1), tf.bool)
+                    left_child = tf.cast(tf.gather(rows['left_child'], ctr, axis=1), tf.bool)
+                    parent_idx = tf.gather(rows['parent'], ctr, axis=1)
+                    parent_inp = self.embed(parent_idx, dependency, dependency) if layer == 0 \
+                                 else cells.rnn[dependency][layer-1].get_output(cell_data, parent_idx)
+                    inp = tf.stack([inp, parent_embedding])
 
-    with tf.Graph().as_default():
-        initializer = tf.random_uniform_initializer(-config['init_scale'],
-                                                    config['init_scale'])
+                    cells.rnn[dependency][layer].step(cell_data, ctr, tree_embedding, left_child, add_state=right_sibling)
 
-        with tf.name_scope("Train"):
-            with tf.variable_scope("TRNNModel", reuse=None, initializer=initializer):
-                m = TRNNModel(is_training=True, config=config)#, input_=raw_data['train'])
-            tf.summary.scalar("Training_Loss", m.cost)
-            tf.summary.scalar("Learning_Rate", m.lr)
+                ctr = tf.add(ctr, 1) if self.config['dependencies'][dependency] == 'forward' else tf.subtract(ctr, 1)
 
-        # TODO: Can remove Valid and Training nodes from the saved model?
-        with tf.name_scope("Valid"):
-            with tf.variable_scope("TRNNModel", reuse=True, initializer=initializer):
-                mvalid = TRNNModel(is_training=False, config=config)
-            tf.summary.scalar("Validation_Loss", mvalid.cost)
+                return ctr, cell_data, children_tmp_states, children_output, children_predictor_states
+            return loop_body
 
-        with tf.name_scope("Test"):
-            with tf.variable_scope("TRNNModel", reuse=True, initializer=initializer):
-                mtest = TRNNModel(is_training=False, config=eval_config)
+        h_pred = {}
+        for i in dependencies:
+            direction = dependencies[i]
 
-        # save stuff to be used later in inference
-        for k in mtest.placeholders['data']:
-            config['placeholders']['data'][k] = mtest.placeholders['data'][k].name
-        for k in mtest.placeholders['inference']:
-            config['placeholders']['inference'][k] = {
-                'attr' : mtest.placeholders['inference'][k]['attr'].name,
-                'label' : mtest.placeholders['inference'][k]['label'].name
-            }
-        config['placeholders']['is_inference'] = mtest.placeholders['is_inference'].name
-        config['fetches'] = mtest.fetches
-        config['feed'] = mtest.feed
+            # TODO: don't need to loop over num_layers if we aren't handling children.
+            # Can just grab the states and outputs of the final layers
+            for layer in range(num_layers):
 
-        saver = tf.train.Saver()
+                # forward starts iterating from 1, since 0 is the "empty" parent/sibling
+                ctr = 1 if direction == 'forward' else data_length - 1
 
-        with tf.Session() as session:
-            session.run(tf.global_variables_initializer())
+                children_tmp_states, children_output, children_predictor_states = 0,0,0
+                ctr, cells.data, children_tmp_states, children_output, children_predictor_states = \
+                    tf.while_loop(loop_cond_wrapper(i), loop_body_wrapper(i, layer),
+                                [ctr,
+                                cells.data,
+                                children_tmp_states,
+                                children_output,
+                                children_predictor_states],
+                                parallel_iterations=1)
 
-            for i in range(config['max_max_epoch']):
-                lr_decay = config['lr_decay'] ** max(i + 1 - config['max_epoch'], 0.0)
-                m.assign_lr(session, config['learning_rate'] * lr_decay)
+            if i != 'children':
+                #predicted_output = cells.rnn[i][num_layers-1].stack_output(cells.data)
+                # technically for linear, we just need to shift the outputs to align with the tokens. But that
+                # doesn't work in the general case
+                predicted_output = cells.rnn[i][num_layers-1].stack_output(cells.data)
+                labels = tf.concat(self.rows[i], axis=0)
+                predicted_output = tf.gather(predicted_output, labels)
+                #predicted_output = cells.rnn[i][num_layers-1].stack_output(cells.data)
+                ##predicted_output = tf.gather(predicted_output, self.rows[i][0])
+                #predicted_output = tf.gather(predicted_output, labels)
+            else:
+                predicted_output = array.gather(children_output, ctr)
 
-                print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-                train_perplexity = run_epoch(session, m, raw_data['train'], eval_op=m.train_op,
-                                            verbose=True)
-                print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
+            if config['model'] != 'linear':
+                with tf.variable_scope("Parameters/{}".format(dependencies[i]), reuse=True):
+                    U_dependency = tf.get_variable('U_' + i, [hidden_size, hidden_size], dtype=data_type())
+                predicted_output = tf.matmul(predicted_output, U_dependency)
+            if direction not in h_pred:
+                h_pred[direction] = tf.zeros([num_rows, data_length, hidden_size])
+            h_pred[direction] += predicted_output
+            right_hole_h_pred = tf.zeros([num_rows,hidden_size])
 
-                valid_perplexity = run_epoch(session, mvalid, raw_data['valid'])
-                print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
+                    #right_hole_h_pred = tf.zeros([1,size])
+                        # XXX only do this in reverse direction
+                        # if right_hole is non-zero, we still want to read from 0 in the inference case
+                        #if 'children' in config['dependencies']:
+                        #    h_pred_tmp = lambda: tf.cond(config['placeholders']['is_inference'],
+                        #                        lambda: h_pred_infer[i],
+                        #                        lambda: h_pred[i].read(right_hole))
+                        #    right_hole_h_pred = tf.cond(tf.cast(right_hole, tf.bool),
+                        #                                lambda: right_hole_h_pred + h_pred_tmp(),
+                        #                                lambda: right_hole_h_pred)
 
-            test_perplexity = run_epoch(session, mtest, raw_data['test'])
-            print("Test Perplexity: %.3f" % test_perplexity)
+        labels, logits = {}, {}
+        for direction in self.directions:
+            labels[direction], logits[direction] = self.collect_directional_logits(direction,
+                                                        h_pred[direction], right_hole_h_pred)
 
-            config['train_perplexity'] = train_perplexity
-            config['valid_perplexity'] = valid_perplexity
-            config['test_perplexity'] = test_perplexity
-
-            if FLAGS.save_path:
-                if not os.path.isdir(FLAGS.save_path):
-                    os.makedirs(FLAGS.save_path)
-                saver.save(session, os.path.join(FLAGS.save_path, 'tree_model'))
-                with open(os.path.join(FLAGS.save_path, 'tree_training_config.json'), 'w') as f:
-                    json.dump(config, f)
-
-if __name__ == "__main__":
-    tf.app.run()
+        loss, train_vars = self.calculate_loss_and_tvars(labels, logits)
+        #if len(self.directions) == 2:
+        #    #labels, logits = self.collect_joint_logits(h_pred, loss)
+        #    #joint_loss, joint_tvars = self.calculate_loss_and_tvars(labels, logits)
+        #    joint_loss, joint_tvars = self.collect_joint_logits(h_pred, loss)
+        #    #loss.update(joint_loss)
+        #    train_vars.extend(joint_tvars)
+        self.fetches['loss'] = loss
+        #optimizer = tf.train.GradientDescentOptimizer(lr)
+        optimizer = tf.train.AdamOptimizer(1e-2)
+        self.ops['train'] = optimizer.apply_gradients(train_vars, global_step=tf.train.get_or_create_global_step())
