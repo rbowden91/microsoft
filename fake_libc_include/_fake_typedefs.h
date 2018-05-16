@@ -159,8 +159,8 @@ typedef unsigned long VisualID;
 typedef XID Window;
 
 /* Mir typedefs */
-typedef void* MirEGLNativeWindowType;
-typedef void* MirEGLNativeDisplayType;
+//typedef void* MirEGLNativeWindowType;
+//typedef void* MirEGLNativeDisplayType;
 typedef struct MirConnection MirConnection;
 typedef struct MirSurface MirSurface;
 typedef struct MirSurfaceSpec MirSurfaceSpec;

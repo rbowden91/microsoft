@@ -23,14 +23,14 @@ var timeout_interval = 0.01;
 var files = {};
 
 function parse_results(file) {
-    // XXX make this a Command Line Arg
-    var results_file = '../tasks/.' + file + '-results'
+    var f = files[file]
+    var results_file = 'tasks/' + f.model + '/.' + file + '-results'
     if (!fs.existsSync(results_file)) {
-    	files[file].retries++;
-        if (files[file].retries * timeout_interval > max_timeout) {
+    	f.retries++;
+        if (f.retries * timeout_interval > max_timeout) {
             try {
-		files[file].socket.emit('response', { success:false, results: 'Server took too long to respond!' });
-		fs.unlinkSync('../tasks/' + file);
+		f.socket.emit('response', { success: false, results: 'Server took too long to respond!' });
+		fs.unlinkSync('tasks/' + f.model + '/' + f.file);
 		fs.unlinkSync(results_file);
 	    } catch(e) {console.log(e)}
             delete(files[file])
@@ -41,10 +41,10 @@ function parse_results(file) {
     try {
     	results = fs.readFileSync(results_file);
 	json = JSON.parse(results);
-	files[file].socket.emit('response', { success:true, results: json });
+	files[file].socket.emit('response', { success: true, results: json, model: files[file].model });
     } catch(e) {
     	console.log(e);
-    	files[file].socket.emit('response', { success:false, results: e });
+    	files[file].socket.emit('response', { success: false, results: e });
     }
     delete(files[file])
     // XXX should probably clean all these up on server boot
@@ -52,10 +52,11 @@ function parse_results(file) {
 }
 
 io.on('connection', function(socket){
-  socket.on('code', function(msg){
-    file = uuid() + '.c';
-    files[file] = {'socket': socket, 'retries': 0}
-    fs.writeFileSync('../tasks/' + file, msg);
-    setTimeout(function() { parse_results(file) }, timeout_interval);
-  });
+    socket.on('code', function(msg){
+        msg = JSON.parse(msg);
+        file =  uuid() + '.c';
+        files[file] = {'socket': socket, 'retries': 0, 'model': msg.model, 'uuid': file}
+        fs.writeFileSync('tasks/' + msg.model + '/' + file, msg.code);
+        setTimeout(function() { parse_results(file) }, timeout_interval);
+    });
 });
