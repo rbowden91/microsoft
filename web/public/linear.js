@@ -47,17 +47,26 @@ function drawLinear(data) {
     var indentation_level = 0;
     var newline = false;
     directions = Object.keys(data[0])
-    if (directions.length == 2) {
-        output += '<input type="radio" name="dir" value="forward"> Forward' +
-                  '<input type="radio" name="dir" value="reverse"> Reverse<br><br>'
-        if (typeof(data.direction) === 'undefined') {
-            data.direction = 'forward';
-        }
-        var direction = data.direction;
-    } else {
-        var direction = directions[0];
-        data.direction = direction
+    output = ''
+    for (var i = 0; i < directions.length; i++) {
+        output += '<input type="radio" name="dir" value="' + directions[i] +'"> ' + directions[i] + '<br>';
     }
+    // XXX fix this mess
+    if (typeof(data.direction) === 'undefined') {
+        var direction = directions[0]
+    } else {
+        direction = data.direction
+    }
+    if (direction == 'joint') {
+        color_direction = 'joint'
+        direction = 'forward';
+    } else {
+        color_direction = 'forward'
+    }
+
+    data.direction = direction;
+
+
     for (var i = 0; i < data.length; i++) {
     	var token = data[i][direction].token;
 
@@ -70,16 +79,30 @@ function drawLinear(data) {
 	    newline = false;
 	}
 
+        if (color_direction === 'joint') {
+            var ratio = data[i]['forward'].label_ratio * data[i]['reverse'].label_ratio
+            //if (data[i]['joint']['probabilities'][0] > 0.5) {
+            //    ratio = data[i]['reverse'].label_ratio;
+            //} else {
+            //    ratio = data[i]['forward'].label_ratio;
+            //}
+        } else {
+            ratio = data[i][direction].label_ratio;
+        }
+
 	//if (i !== 0) {
 	    //if (data[i][0] === "'")
-	    output += "<span style='background-color:" + gradient(grad, data[i][direction].label_ratio) + "' data-expected='" +
+	    output += "<span style='background-color:" +
+		//gradient(grad, data[i]['forward'].label_expected_probability * data[i]['reverse'].label_expected_probability) +
+	    	gradient(grad, ratio) +
+	    	"' data-expected='" +
 		      htmlEncode(data[i][direction].label_expected) +
 		      "' data-ratio='" + data[i][direction].label_ratio + "'" +
 		      " data-max-prob='" + data[i][direction].label_expected_probability + "'" +
 		      " data-actual='" +
 		      htmlEncode(data[i][direction].label_actual) +
 		      "' data-actual-prob='" + data[i][direction].label_actual_probability + "'" +
-	              " data-token_num='" + i + "'" +
+	              " data-token_num='" + i + "' data-alpha='" + data[i]['joint']['probabilities'][0] + "'" +
 		      ">";
 	//}
     	output += htmlEncode(token);
@@ -109,6 +132,10 @@ function drawLinear(data) {
         for (var k in d) {
             expectation += htmlEncode(k) + ': ' + htmlEncode(d[k]) + '<br>';
         }
+	probs = data[d.token_num][data.direction]['probabilities']
+	for (var i = 0; i < 10; i++) {
+	    expectation += htmlEncode(probs[i][1]) + ':' + htmlEncode(probs[i][0]) + '<br>';
+	}
         $('#expectation').html(expectation);
     }
 

@@ -36,6 +36,7 @@ parser.add_argument('-n', '--num_files', help='number of files to train on (defa
 parser.add_argument('-d', '--dependencies', help='forward/reverse | left_sibling/parent/left_prior | '
                                            'children/right_sibling/right_prior',
                                             type=lambda s: s.split())
+parser.add_argument('-e', '--epochs', help='how many epochs', type=int)
 parser.add_argument('--profile', help='enable graph profiling (default false)', action="store_true")
 parser.add_argument('--checkpoint', help='attempts to resume training from a checkpoint file (default false)', action="store_true")
 
@@ -118,6 +119,19 @@ def get_config():
 
 class Trainer():
 
+    def run_profiler(self):
+        writer = tf.summary.FileWriter('log/')
+        run_metadata = tf.RunMetadata()
+        vals = self.session.run(fetches, feed_dict,
+                        options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
+                        run_metadata=run_metadata)
+        #writer.add_run_metadata(run_metadata, 'run metadata')
+        from tensorflow.python.client import timeline
+        ft = timeline.Timeline(run_metadata.step_stats)
+        chrome_trace = ft.generate_chrome_trace_format()
+        with open('timeline_01.json', 'w') as f:
+            f.write(chrome_trace)
+        sys.exit(0)
 
     def run_epoch(self, mode, lr_decay = None, verbose=False):
         model = self.model
@@ -148,27 +162,42 @@ class Trainer():
         epoch_step = self.epoch_step
         self.epoch_step = 0
         while epoch_step < epoch_size:
-            if model.config['profile'] and mode == 'train':
-                writer = tf.summary.FileWriter('log/')
-                run_metadata = tf.RunMetadata()
-                vals = self.session.run(fetches, feed_dict,
-                                options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE),
-                                run_metadata=run_metadata)
-                #writer.add_run_metadata(run_metadata, 'run metadata')
-                from tensorflow.python.client import timeline
-                ft = timeline.Timeline(run_metadata.step_stats)
-                chrome_trace = ft.generate_chrome_trace_format()
-                with open('timeline_01.json', 'w') as f:
-                    f.write(chrome_trace)
-                sys.exit(0)
-
             vals = self.session.run(fetches, feed_dict)
+
+            if model.config['profile'] and mode == 'train':
+                self.run_profiler()
 
             if verbose:
                 print("\n%.02f%%:\tspeed: %.03f fps" %
                     ((epoch_step + 1) * 100.0 / epoch_size, (epoch_step + 1) * batch_size / (time.time() - start_time)))
             for d in vals['loss']:
                 if d not in total_loss: total_loss[d] = {}
+                for k in vals['loss'][d]:
+                    if k not in total_loss[d]: total_loss[d][k] = 0
+                    loss = np.asscalar(vals['loss'][d][k]['loss'])
+                    total_loss[d][k] += loss;
+                    if verbose:
+                        print("\t%s %s loss: %.3f\tperplexity: %.3f\taverage perplexity: %.3f" %
+                            (d, k, loss, np.exp(loss), np.exp(total_loss[d][k] / (epoch_step + 1))))
+            epoch_step += 1
+
+        fetches = {
+            "loss": model.fetches['loss'],
+            "probabilities": model.fetches['loss'],
+        }
+        if mode == 'train':
+            fetches["train"] = model.ops['train_joint']
+        epoch_step = self.epoch_step
+        self.epoch_step = 0
+        while epoch_step < epoch_size:
+            vals = self.session.run(fetches, feed_dict)
+
+            if verbose:
+                print("\n%.02f%%:\tspeed: %.03f fps" %
+                    ((epoch_step + 1) * 100.0 / epoch_size, (epoch_step + 1) * batch_size / (time.time() - start_time)))
+            print(vals['loss']['joint']['label']['probabilities'][1])
+            total_loss['joint'] = {}
+            for d in vals['loss']:
                 for k in vals['loss'][d]:
                     if k not in total_loss[d]: total_loss[d][k] = 0
                     loss = np.asscalar(vals['loss'][d][k]['loss'])
@@ -302,12 +331,15 @@ def main(_):
         with open(os.path.join(args.data_path, args.model + '_lexicon.json')) as f:
             token_ids = json.load(f)
 
-
         # Note that at this point, the training, validation, and test data have already been split up.
         # So, we preserve the ratios between them.
         if args.num_files is not None:
             config['num_files'] = min(args.num_files, config['num_files'])
         del(args.num_files)
+
+        if args.epochs is not None:
+            config['max_max_epoch'] = args.epochs
+        del(args.epochs)
 
         config.update(get_config())
         config.update(vars(args))

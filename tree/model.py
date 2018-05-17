@@ -85,6 +85,7 @@ class TRNNModel(object):
         }
 
     def collect_directional_logits(self, direction, h_pred, right_hole_h_pred):
+        num_rows = tf.shape(self.rows['label_index'])[0]
         size = self.config['hidden_size']
         label_size = self.config['label_size']
         attr_size = self.config['attr_size']
@@ -94,8 +95,9 @@ class TRNNModel(object):
 
         # tiles a parameter matrix/vector for matmul on a whole batch
         def tile(matrix):
-            tiled_matrix = tf.tile(tf.reshape(matrix, [-1]), [tf.shape(h_pred)[0]])
-            return tf.reshape(tiled_matrix, [tf.shape(h_pred)[0], tf.shape(matrix)[0], tf.shape(matrix)[1]])
+            tiled_matrix = tf.tile(tf.reshape(matrix, [-1]), [num_rows])
+            #return tf.reshape(tiled_matrix, [num_rows, tf.shape(matrix)[0], tf.shape(matrix)[1]])
+            return tf.reshape(tiled_matrix, [tf.shape(matrix)[0], tf.shape(matrix)[1]])
 
         # grab all of the projection paramaters, now that we have the current node's LSTM state
         with tf.variable_scope("Parameters/{}".format(direction), reuse=True):
@@ -113,7 +115,7 @@ class TRNNModel(object):
 
         # this is the only loss here that linear uses
         logits['label'] = tf.matmul(h_pred, tile(label_w)) + label_b
-        labels['label'] = self.rows['label_index']
+        labels['label'] = self.rows['label_index'][0]
 
         if self.config['model'] == 'ast':
             # loss for whether we are the last sibling on the left or right
@@ -144,7 +146,7 @@ class TRNNModel(object):
 
         return labels, logits
 
-    def collect_joint_logits(self, h_pred_ctr, loss):
+    def collect_joint_logits(self, h_pred_ctr, directional_loss):
         #labels = {'joint':{}}
         #logits = {'joint':{}}
 
@@ -167,33 +169,48 @@ class TRNNModel(object):
 
         #return labels, logits
         label_size = self.config['label_size']
-        actual_label = tf.one_hot(self.rows['label_index'], label_size, axis=2)
-        forward = tf.multiply(loss['forward']['label']['probabilities'], actual_label)
-        forward = tf.reduce_sum(forward, axis=2)
-        reverse = tf.multiply(loss['reverse']['label']['probabilities'], actual_label)
-        reverse = tf.reduce_sum(reverse, axis=2)
-        forward = tf.Print(forward, [tf.shape(forward), tf.shape(reverse)])
+        actual_label = tf.one_hot(self.rows['label_index'][0], label_size, axis=1)
+        forward = tf.multiply(directional_loss['forward']['label']['probabilities'], actual_label)
+        forward = tf.reduce_sum(forward, axis=1)
+
+        reverse = tf.multiply(directional_loss['reverse']['label']['probabilities'], actual_label)
+        reverse = tf.reduce_sum(reverse, axis=1)
+        forward_embedding = self.embed(self.rows['left_sibling'][0], 'left_sibling')
+        reverse_embedding = self.embed(self.rows['right_sibling'][0], 'right_sibling')
+        #reverse = tf.reduce_sum(reverse, axis=1)
+        #forward = tf.Print(forward, [forward, reverse])
 
         with tf.variable_scope("Parameters/joint", reuse=True):
-            u_alpha = tf.get_variable("u_alpha", [self.config['hidden_size'] * 2], dtype=data_type())
+            u_alpha = tf.get_variable("u_alpha", [self.config['hidden_size'] * 4, 2], dtype=data_type())
+            b_alpha = tf.get_variable("b_alpha", [2], dtype=data_type())
 
-        labels = forward / (forward + reverse)
-        logits = tf.reduce_sum(tf.multiply(u_alpha, tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse']], axis=2)), axis=2)
-        logits = tf.Print(logits, [tf.shape(labels), tf.shape(logits)])
+        # something other than transpose?
+        labels = tf.transpose([reverse / (forward + reverse), forward / (forward+reverse)])
+        combined = tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse'], forward_embedding[0], reverse_embedding[0]], axis=1)
+        logits = tf.matmul(combined, u_alpha) + b_alpha
+        #logits = tf.reduce_sum(tf.multiply(u_alpha, tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse']], axis=1)),
+        #        axis=1)
+        logits = tf.Print(logits, ['***', logits[1], labels[1], forward[1], reverse[1]])
 
         #logits['joint']['alpha'] = tf.Print(logits['joint']['alpha'], [tf.shape(labels['joint']['alpha']), tf.shape(logits['joint']['alpha'])])
-        mask = tf.cast(self.rows['mask'], tf.float32)
+        mask = tf.cast(self.rows['mask'][0], tf.float32)
         num_tokens = tf.reduce_sum(mask)
-        loss['joint'] = {'label': {}}
-        loss['joint']['label']['loss'] = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits)  * mask) / num_tokens
-        loss['joint']['label']['probabilities'] = tf.nn.sigmoid(logits)
+        loss = { 'joint': {'label': {}} }
+        loss['joint']['label']['loss'] = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=labels, logits=logits)  * mask) / num_tokens
+        loss['joint']['label']['probabilities'] = tf.nn.softmax(logits)
+        #loss['joint']['label']['loss'] = tf.Print(loss['joint']['label']['loss'],
+                #[loss['joint']['label']['probabilities']])
 
+        #reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+        #tf.reduce_sum(reg_losses)
         scope = tf.contrib.framework.get_name_scope()
         if scope != '':
             scope += '/'
         tvars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "{}Parameters/{}".format(scope, 'joint'))
-        grads, _ = tf.clip_by_global_norm(tf.gradients(loss['joint']['label']['probabilities'], tvars), self.config['max_grad_norm'])
+        grads, _ = tf.clip_by_global_norm(tf.gradients(loss['joint']['label']['loss'], tvars), self.config['max_grad_norm'])
+
         train_vars = zip(grads, tvars)
+
 
         return loss, train_vars
 
@@ -298,7 +315,10 @@ class TRNNModel(object):
 
         with tf.variable_scope('Parameters'):
             with tf.variable_scope("joint"):
-                u_alpha = tf.get_variable("u_alpha", [size * 2], dtype=data_type())
+                u_alpha = tf.get_variable("u_alpha", [size * 4, 2], regularizer=tf.contrib.layers.l2_regularizer(0.0),
+                                                dtype=data_type())
+                b_alpha = tf.get_variable("b_alpha", [2], regularizer=tf.contrib.layers.l2_regularizer(0.0),
+                                        dtype=data_type())
             for d in set(self.config['dependencies'].values()):
                 with tf.variable_scope(d):
                     # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
@@ -513,11 +533,8 @@ class TRNNModel(object):
                 # technically for linear, we just need to shift the outputs to align with the tokens. But that
                 # doesn't work in the general case
                 predicted_output = cells.rnn[i][num_layers-1].stack_output(cells.data)
-                labels = tf.concat(self.rows[i], axis=0)
-                predicted_output = tf.gather(predicted_output, labels)
-                #predicted_output = cells.rnn[i][num_layers-1].stack_output(cells.data)
-                ##predicted_output = tf.gather(predicted_output, self.rows[i][0])
-                #predicted_output = tf.gather(predicted_output, labels)
+                #labels = tf.concat(self.rows[i], axis=0)
+                predicted_output = tf.gather(predicted_output, self.rows[i][0])
             else:
                 predicted_output = array.gather(children_output, ctr)
 
@@ -526,7 +543,8 @@ class TRNNModel(object):
                     U_dependency = tf.get_variable('U_' + i, [hidden_size, hidden_size], dtype=data_type())
                 predicted_output = tf.matmul(predicted_output, U_dependency)
             if direction not in h_pred:
-                h_pred[direction] = tf.zeros([num_rows, data_length, hidden_size])
+                #h_pred[direction] = tf.zeros([num_rows, data_length, hidden_size])
+                h_pred[direction] = tf.zeros([data_length, hidden_size])
             h_pred[direction] += predicted_output
             right_hole_h_pred = tf.zeros([num_rows,hidden_size])
 
@@ -547,13 +565,17 @@ class TRNNModel(object):
                                                         h_pred[direction], right_hole_h_pred)
 
         loss, train_vars = self.calculate_loss_and_tvars(labels, logits)
-        #if len(self.directions) == 2:
-        #    #labels, logits = self.collect_joint_logits(h_pred, loss)
-        #    #joint_loss, joint_tvars = self.calculate_loss_and_tvars(labels, logits)
-        #    joint_loss, joint_tvars = self.collect_joint_logits(h_pred, loss)
-        #    #loss.update(joint_loss)
-        #    train_vars.extend(joint_tvars)
         self.fetches['loss'] = loss
         #optimizer = tf.train.GradientDescentOptimizer(lr)
         optimizer = tf.train.AdamOptimizer(1e-2)
         self.ops['train'] = optimizer.apply_gradients(train_vars, global_step=tf.train.get_or_create_global_step())
+
+        if len(self.directions) == 2:
+            #labels, logits = self.collect_joint_logits(h_pred, loss)
+            #joint_loss, joint_tvars = self.calculate_loss_and_tvars(labels, logits)
+            joint_loss, joint_tvars = self.collect_joint_logits(h_pred, loss)
+            #loss.update(joint_loss)
+            self.fetches['loss'].update(joint_loss)
+            #optimizer = tf.train.GradientDescentOptimizer(.0uu01)
+            # use a different global step
+            self.ops['train_joint'] = optimizer.apply_gradients(joint_tvars, global_step=tf.train.get_or_create_global_step())

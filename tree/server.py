@@ -228,9 +228,11 @@ def run_linear_epoch(session, graph, config, tokens, raw_data):
             #props[i][k] = vals[k]
             # get ids of expected and actual labels
 
-        probs = vals[direction]['label']['probabilities'][0]
+        probs = vals[direction]['label']['probabilities']
         target_ids = data_dict[config['placeholders']['features']['label_index']][0]
         for i in range(len(tokens)):
+            # move this somewhere more sensible
+            props[i]['joint'] = {}
             rank = np.flip(np.argsort(probs[i]), 0)
             props[i][direction]['token'] = tokens[i][1]
             props[i][direction]['label_expected'] = raw_data['id_to_label'][rank[0]]
@@ -241,6 +243,7 @@ def run_linear_epoch(session, graph, config, tokens, raw_data):
                     (probs[i][rank[0]]))
                     #(probabilities[i][expected_ids[i]] + probabilities[i][target_ids[i]]))
             props[i][direction]['probabilities'] = [(float(probs[i][j]), raw_data['id_to_label'][j]) for j in rank]
+            props[i]['joint']['probabilities'] = vals['joint']['label']['probabilities'][i].tolist()
         for k in vals[direction]:
             print('{} {} perplexity: {}'.format(direction, k, np.exp(vals[direction][k]['loss'])))
 
