@@ -95,33 +95,31 @@ class TRNNModel(object):
 
         # tiles a parameter matrix/vector for matmul on a whole batch
         def tile(matrix):
-            tiled_matrix = tf.tile(tf.reshape(matrix, [-1]), [num_rows])
-            #return tf.reshape(tiled_matrix, [num_rows, tf.shape(matrix)[0], tf.shape(matrix)[1]])
-            return tf.reshape(tiled_matrix, [tf.shape(matrix)[0], tf.shape(matrix)[1]])
+            return tf.tile(matrix, [num_rows, 1, 1])
 
         # grab all of the projection paramaters, now that we have the current node's LSTM state
         with tf.variable_scope("Parameters/{}".format(direction), reuse=True):
             u_end = tf.get_variable('u_end', [size], dtype=data_type())
 
-            attr_w = tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
-            attr_b = tf.get_variable("attr_b", [attr_size], dtype=data_type())
-            v_attr = tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
+            attr_w = tf.get_variable("attr_w", [1, size, attr_size], dtype=data_type())
+            attr_b = tf.get_variable("attr_b", [1, attr_size], dtype=data_type())
+            attr_v = tf.get_variable("v_attr", [1, label_size, attr_size], dtype=data_type())
 
-            label_w = tf.get_variable("label_w", [size, label_size], dtype=data_type())
-            label_b = tf.get_variable("label_b", [label_size], dtype=data_type())
+            label_w = tf.get_variable("label_w", [1, size, label_size], dtype=data_type())
+            label_b = tf.get_variable("label_b", [1, label_size], dtype=data_type())
 
             if direction == 'reverse':
-                u_right_hole = tf.get_variable('u_right_hole', [size * 2], dtype=data_type())
+                u_right_hole = tf.get_variable('u_right_hole', [1, size * 2], dtype=data_type())
 
         # this is the only loss here that linear uses
-        logits['label'] = tf.matmul(h_pred, tile(label_w)) + label_b
-        labels['label'] = self.rows['label_index'][0]
+        logits['label_index'] = tf.matmul(h_pred, tile(label_w)) + label_b
+        labels['label_index'] = self.rows['label_index']
 
         if self.config['model'] == 'ast':
             # loss for whether we are the last sibling on the left or right
-            labels[direction]['end'] = tf.cast(self.rows['last_sibling' if direction == 'forward'
-                                                                else 'first_sibling'], data_type())
-            logits['end'] = tf.reduce_sum(tf.multiply(u_end, h_pred), axis=0)
+            end = 'last_sibling' if direction == 'forward' else 'first_sibling'
+            labels[end] = tf.cast(self.rows[end], data_type())
+            logits[end] = tf.reduce_sum(tf.multiply(u_end, h_pred), axis=2)
 
             #right_hole_h_pred = tf.Print(right_hole_h_pred, [right_hole, right_sibling, right_hole_h_pred])
             #if direction == 'reverse':
@@ -141,8 +139,9 @@ class TRNNModel(object):
             #    predicted_right_hole = tf.constant(0.0)
 
             actual_label = tf.one_hot(self.rows['label_index'], label_size)
-            logits['attr'] = tf.matmul(h_pred, tile(attr_w)) + attr_b + tf.matmul(actual_label, tile(attr_v))
-            labels['attr'] = self.rows['attr_index']
+            logits['attr_index'] = tf.matmul(h_pred, tile(attr_w)) + attr_b + tf.matmul(actual_label, tile(attr_v))
+            labels['attr_index'] = self.rows['attr_index']
+            print(labels['attr_index'], logits['attr_index'])
 
         return labels, logits
 
@@ -170,36 +169,31 @@ class TRNNModel(object):
         #return labels, logits
         label_size = self.config['label_size']
         actual_label = tf.one_hot(self.rows['label_index'][0], label_size, axis=1)
-        forward = tf.multiply(directional_loss['forward']['label']['probabilities'], actual_label)
-        forward = tf.reduce_sum(forward, axis=1)
+        forward = tf.multiply(directional_loss['forward']['label_index']['probabilities'], actual_label)
+        forward = tf.reduce_sum(forward, axis=2)
 
-        reverse = tf.multiply(directional_loss['reverse']['label']['probabilities'], actual_label)
-        reverse = tf.reduce_sum(reverse, axis=1)
+        reverse = tf.multiply(directional_loss['reverse']['label_index']['probabilities'], actual_label)
+        reverse = tf.reduce_sum(reverse, axis=2)
         forward_embedding = self.embed(self.rows['left_sibling'][0], 'left_sibling')
         reverse_embedding = self.embed(self.rows['right_sibling'][0], 'right_sibling')
         #reverse = tf.reduce_sum(reverse, axis=1)
         #forward = tf.Print(forward, [forward, reverse])
 
         with tf.variable_scope("Parameters/joint", reuse=True):
-            u_alpha = tf.get_variable("u_alpha", [self.config['hidden_size'] * 4, 2], dtype=data_type())
-            b_alpha = tf.get_variable("b_alpha", [2], dtype=data_type())
+            u_alpha = tf.get_variable("u_alpha", [1, self.config['hidden_size'] * 4, 2], dtype=data_type())
+            b_alpha = tf.get_variable("b_alpha", [1, 2], dtype=data_type())
 
         # something other than transpose?
-        labels = tf.transpose([reverse / (forward + reverse), forward / (forward+reverse)])
-        combined = tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse'], forward_embedding[0], reverse_embedding[0]], axis=1)
-        logits = tf.matmul(combined, u_alpha) + b_alpha
-        #logits = tf.reduce_sum(tf.multiply(u_alpha, tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse']], axis=1)),
-        #        axis=1)
-        logits = tf.Print(logits, ['***', logits[1], labels[1], forward[1], reverse[1]])
+        labels = tf.transpose([forward / (forward + reverse), reverse / (forward + reverse)])
+        combined = tf.concat([h_pred_ctr['forward'], h_pred_ctr['reverse'], forward_embedding, reverse_embedding], axis=2)
+        num_rows = tf.shape(self.rows['label_index'])[0]
+        logits = tf.matmul(combined, tf.tile(u_alpha, [num_rows, 1, 1])) + b_alpha
 
-        #logits['joint']['alpha'] = tf.Print(logits['joint']['alpha'], [tf.shape(labels['joint']['alpha']), tf.shape(logits['joint']['alpha'])])
         mask = tf.cast(self.rows['mask'][0], tf.float32)
         num_tokens = tf.reduce_sum(mask)
-        loss = { 'joint': {'label': {}} }
-        loss['joint']['label']['loss'] = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=labels, logits=logits)  * mask) / num_tokens
-        loss['joint']['label']['probabilities'] = tf.nn.softmax(logits)
-        #loss['joint']['label']['loss'] = tf.Print(loss['joint']['label']['loss'],
-                #[loss['joint']['label']['probabilities']])
+        loss = { 'joint': {'label_index': {}} }
+        loss['joint']['label_index']['loss'] = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=labels, logits=logits)  * mask) / num_tokens
+        loss['joint']['label_index']['probabilities'] = tf.nn.softmax(logits)
 
         #reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
         #tf.reduce_sum(reg_losses)
@@ -207,7 +201,7 @@ class TRNNModel(object):
         if scope != '':
             scope += '/'
         tvars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "{}Parameters/{}".format(scope, 'joint'))
-        grads, _ = tf.clip_by_global_norm(tf.gradients(loss['joint']['label']['loss'], tvars), self.config['max_grad_norm'])
+        grads, _ = tf.clip_by_global_norm(tf.gradients(loss['joint']['label_index']['loss'], tvars), self.config['max_grad_norm'])
 
         train_vars = zip(grads, tvars)
 
@@ -224,37 +218,19 @@ class TRNNModel(object):
             total_loss = 0.0
             for k in labels[subset]:
                 log, lab = logits[subset][k], labels[subset][k]
-                cross, predict = (tf.nn.sigmoid_cross_entropy_with_logits, tf.nn.sigmoid) if tf.rank(log) == 3 \
+                cross, predict = (tf.nn.sigmoid_cross_entropy_with_logits, tf.nn.sigmoid) if len(log.shape) == 2 \
                                  else (tf.nn.sparse_softmax_cross_entropy_with_logits, tf.nn.softmax)
-                #log, lab = logits[subset][k], labels[subset][k]
-                #cross, predict = (tf.nn.sigmoid_cross_entropy_with_logits, tf.nn.sigmoid) if tf.rank(log) == 3 \
-                #                 else (tf.nn.sparse_softmax_cross_entropy_with_logits, tf.nn.softmax)
-                #loss[subset][k] = {
-                #    'probabilities': predict(log),
-                #    'loss': tf.reduce_sum(cross(labels=lab, logits=log) * mask)
-                #}
-                #total_loss += loss[subset][k]['loss']
-                #loss[subset][k]['loss'] /= num_tokens
-                if subset == 'joint':
-                    cross = tf.nn.softmax_cross_entropy_with_logits
+                print(subset, k, lab, log)
                 loss[subset][k] = {
                     'probabilities': predict(log),
                     'loss': tf.reduce_sum(cross(labels=lab, logits=log) * mask) / num_tokens
                 }
-                #if tf.rank(log) == 3:
-                #    print('ugh')
-                #    loss[subset][k]['loss'] = tf.reduce_sum(loss[subset][k]['loss'], axis=2)
-                #reduced_loss = tf.reduce_sum(loss[subset][k]['loss'] * mask)
-                #loss[subset][k]['reduced_loss'] = reduced_loss / num_tokens
                 total_loss += loss[subset][k]['loss']
-                #loss[subset][k]['loss'] = tf.Print(loss[subset][k]['loss'], [loss[subset][k]['loss']])
-                #loss[subset][k]['loss'] /= num_tokens
-            # only update the subset of weights relevant to these losses
-
             # grab the current scope, in case the model was instantiated within a scope
             scope = tf.contrib.framework.get_name_scope()
             if scope != '':
                 scope += '/'
+            # only update the subset of weights relevant to these losses
             tvars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "{}Parameters/{}".format(scope, subset))
             grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), self.config['max_grad_norm'])
             train_vars.extend(zip(grads, tvars))
@@ -315,30 +291,31 @@ class TRNNModel(object):
 
         with tf.variable_scope('Parameters'):
             with tf.variable_scope("joint"):
-                u_alpha = tf.get_variable("u_alpha", [size * 4, 2], regularizer=tf.contrib.layers.l2_regularizer(0.0),
+                u_alpha = tf.get_variable("u_alpha", [1, size * 4, 2], regularizer=tf.contrib.layers.l2_regularizer(0.0),
                                                 dtype=data_type())
-                b_alpha = tf.get_variable("b_alpha", [2], regularizer=tf.contrib.layers.l2_regularizer(0.0),
+                b_alpha = tf.get_variable("b_alpha", [1, 2], regularizer=tf.contrib.layers.l2_regularizer(0.0),
                                         dtype=data_type())
             for d in set(self.config['dependencies'].values()):
                 with tf.variable_scope(d):
                     # the second dimension doesn't have to be "size", but does have to match softmax_w's first dimension
                     for i in self.config['dependencies']:
                         if self.config['dependencies'][i] == d:
-                            tf.get_variable('U_' + i, [size, size], dtype=data_type())
+                            tf.get_variable('U_' + i, [1, size, size], dtype=data_type())
 
                     tf.get_variable('u_end', [size], dtype=data_type())
 
-                    tf.get_variable("attr_w", [size, attr_size], dtype=data_type())
-                    tf.get_variable("attr_b", [attr_size], dtype=data_type())
-                    tf.get_variable("v_attr", [label_size, attr_size], dtype=data_type())
+                    tf.get_variable("attr_w", [1, size, attr_size], dtype=data_type())
+                    tf.get_variable("attr_b", [1, attr_size], dtype=data_type())
+                    tf.get_variable("v_attr", [1, label_size, attr_size], dtype=data_type())
 
-                    tf.get_variable("label_w", [size, label_size], dtype=data_type())
-                    tf.get_variable("label_b", [label_size], dtype=data_type())
+                    tf.get_variable("label_w", [1, size, label_size], dtype=data_type())
+                    tf.get_variable("label_b", [1, label_size], dtype=data_type())
 
                     if d == 'reverse':
-                        tf.get_variable('u_right_hole', [size * 2], dtype=data_type())
+                        tf.get_variable('u_right_hole', [1, size * 2], dtype=data_type())
 
                     # should we have separate parameters for the forward and reverse directions?
+                    # currently, we do
                     #with tf.device("/cpu:0"):
                     tf.get_variable("label_embedding", [label_size, embedding_size], dtype=data_type())
                     tf.get_variable("attr_embedding", [attr_size, embedding_size], dtype=data_type())
@@ -534,13 +511,13 @@ class TRNNModel(object):
                 # doesn't work in the general case
                 predicted_output = cells.rnn[i][num_layers-1].stack_output(cells.data)
                 #labels = tf.concat(self.rows[i], axis=0)
-                predicted_output = tf.gather(predicted_output, self.rows[i][0])
+                predicted_output = tf.gather(predicted_output, self.rows[i])
             else:
                 predicted_output = array.gather(children_output, ctr)
 
             if config['model'] != 'linear':
                 with tf.variable_scope("Parameters/{}".format(dependencies[i]), reuse=True):
-                    U_dependency = tf.get_variable('U_' + i, [hidden_size, hidden_size], dtype=data_type())
+                    U_dependency = tf.get_variable('U_' + i, [1, hidden_size, hidden_size], dtype=data_type())
                 predicted_output = tf.matmul(predicted_output, U_dependency)
             if direction not in h_pred:
                 #h_pred[direction] = tf.zeros([num_rows, data_length, hidden_size])

@@ -57,12 +57,6 @@ function drawLinear(data) {
     } else {
         direction = data.direction
     }
-    if (direction == 'joint') {
-        color_direction = 'joint'
-        direction = 'forward';
-    } else {
-        color_direction = 'forward'
-    }
 
     data.direction = direction;
 
@@ -79,32 +73,8 @@ function drawLinear(data) {
 	    newline = false;
 	}
 
-        if (color_direction === 'joint') {
-            var ratio = data[i]['forward'].label_ratio * data[i]['reverse'].label_ratio
-            //if (data[i]['joint']['probabilities'][0] > 0.5) {
-            //    ratio = data[i]['reverse'].label_ratio;
-            //} else {
-            //    ratio = data[i]['forward'].label_ratio;
-            //}
-        } else {
-            ratio = data[i][direction].label_ratio;
-        }
-
-	//if (i !== 0) {
-	    //if (data[i][0] === "'")
-	    output += "<span style='background-color:" +
-		//gradient(grad, data[i]['forward'].label_expected_probability * data[i]['reverse'].label_expected_probability) +
-	    	gradient(grad, ratio) +
-	    	"' data-expected='" +
-		      htmlEncode(data[i][direction].label_expected) +
-		      "' data-ratio='" + data[i][direction].label_ratio + "'" +
-		      " data-max-prob='" + data[i][direction].label_expected_probability + "'" +
-		      " data-actual='" +
-		      htmlEncode(data[i][direction].label_actual) +
-		      "' data-actual-prob='" + data[i][direction].label_actual_probability + "'" +
-	              " data-token_num='" + i + "' data-alpha='" + data[i]['joint']['probabilities'][0] + "'" +
-		      ">";
-	//}
+        output += "<span style='background-color:"
+        output += gradient(grad, data[i][direction].label_index_ratio) + "' data-token_num='" + i + "'>";
     	output += htmlEncode(token);
 	output += "</span>";
 
@@ -127,32 +97,27 @@ function drawLinear(data) {
     $('#linear_heatmap').html(output);
     $('input[name="dir"][value="' + data.direction +'"]').prop('checked', true)
     if (typeof(data.clicked) !== 'undefined') {
-        expectation = '';
-        d = $("span[data-token_num='" + data.clicked + "']").data();
-        for (var k in d) {
-            expectation += htmlEncode(k) + ': ' + htmlEncode(d[k]) + '<br>';
-        }
-	probs = data[d.token_num][data.direction]['probabilities']
-	for (var i = 0; i < 10; i++) {
-	    expectation += htmlEncode(probs[i][1]) + ':' + htmlEncode(probs[i][0]) + '<br>';
-	}
-        $('#expectation').html(expectation);
-    }
-
-    $('#linear_heatmap span').on('click', function(e) {
     	expectation = '';
-    	d = $(this).data();
-    	for (var k in d) {
-    	    expectation += htmlEncode(k) + ': ' + htmlEncode(d[k]) + '<br>';
+        prob_str = ''
+    	for (var k in data[data.clicked][data.direction]) {
+    	    if (k == 'probabilities') {
+                probs = data[data.clicked][data.direction]['probabilities']
+                for (var i = 0; i < 10; i++) {
+                    prob_str += htmlEncode(probs[i][1]) + ' ' + htmlEncode(probs[i][0]) + '<br>';
+                }
+            } else {
+                expectation += htmlEncode(k) + ': ' + htmlEncode(data[data.clicked][data.direction][k]) + '<br>';
+            }
 	}
-	probs = data[d.token_num][data.direction]['probabilities']
-	for (var i = 0; i < 10; i++) {
-	    expectation += htmlEncode(probs[i][1]) + ':' + htmlEncode(probs[i][0]) + '<br>';
-	}
-	data.clicked = d.token_num;
+	expectation += '<br><br>' + prob_str
 
 	$('#expectation').html(expectation);
 	$('#expectation').show();//css({top: event.clientY - 100, left: event.clientX}).show();
+    }
+
+    $('#linear_heatmap span').on('click', function(e) {
+	data.clicked = $(this).data('token_num');
+	drawLinear(data)
     });
     $('#linear_heatmap input:radio').on('change', function(e) {
         data.direction = this.value;

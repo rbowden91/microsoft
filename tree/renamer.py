@@ -96,14 +96,15 @@ class IDRenamer(c_generator.CGenerator):
         if type_ == 'local' or type_ == 'arg':
             for i in range(len(self.reverse_local_maps[-1]) + 1):
                 if name + str(i) not in self.reverse_local_maps[-1]:
-                    name += str(i)
+                    # XXX don't append a unique ID to it, for now
+                    #name += str(i)
                     break
             else:
                 print('uh oh')
         else:
             for i in range(len(self.reverse_id_map) + 1):
                 if name + str(i) not in self.reverse_id_map:
-                    name += str(i)
+                    #name += str(i)
                     break
             else:
                 print('uh oh')

@@ -43,7 +43,7 @@ function drawTree(treeData) {
 	    + " " + d.parent.x + "," + d.parent.y;
 	})
 	.attr("style", function(d) {
-	    return "stroke:" + gradient(grad, 1-d.data.predicted_end.forward)
+	    return "stroke:" + gradient(grad, 1-d.data.forward.last_sibling_actual)
 	});
 
     // adds each node as a group
@@ -61,7 +61,7 @@ function drawTree(treeData) {
     .attr('class', 'node-circle')
     .attr("r", 10)
     .attr('style', function(d) {
-	return 'stroke:' + gradient(grad, d.data.label_ratio.forward)
+	return 'stroke:' + gradient(grad, d.data.forward.label_index_ratio)
     })
     // 	function() {
     // 	$('#expectation').hide();
@@ -72,28 +72,26 @@ function drawTree(treeData) {
     .attr("dy", ".35em")
     .attr("y", function(d) { return d.children ? -20 : 30; })
     .style("text-anchor", "middle")
-    .text(function(d) { return d.data.attr_actual; })
+    .text(function(d) { return d.data.attr; })
     .style("stroke", function(d) {
-    	return '#' + gradient(grad, d.data.attr_ratio.forward)
+    	return '#' + gradient(grad, d.data.forward.attr_index_ratio)
     });
 
     node.append("text")
     .attr("dy", ".35em")
     .attr("y", function(d) { return d.children ? -30 : 20; })
     .style("text-anchor", "middle")
-    .text(function(d) { return d.data.label_actual; })
+    .text(function(d) { return d.data.label; })
     .on('click', function(d) {
     	expectation = '';
     	keys = Object.keys(d.data).sort()
     	for (var i = 0; i < keys.length; i++) {
-    	    if (['label_probabilities', 'attr_probabilities', 'children', 'children_output', 'children_predictor_output', 'attrs'].indexOf(keys[i]) === -1) {
-    	    	if (typeof d.data[keys[i]] === 'object') {
-    	    	    for (var j in d.data[keys[i]]) {
-			expectation += htmlEncode(keys[i] + ' ' + j) + ': ' + htmlEncode(d.data[keys[i]][j]) + '<br>';
-		    }
-		} else {
-		    expectation += htmlEncode(keys[i]) + ': ' + htmlEncode(d.data[keys[i]]) + '<br>';
-		}
+            if (typeof d.data[keys[i]] === 'object') {
+                for (var j in d.data[keys[i]]) {
+                    expectation += htmlEncode(keys[i] + ' ' + j) + ': ' + htmlEncode(d.data[keys[i]][j]) + '<br>';
+                }
+            } else {
+                expectation += htmlEncode(keys[i]) + ': ' + htmlEncode(d.data[keys[i]]) + '<br>';
             }
 	}
 	$('#expectation').html(expectation);

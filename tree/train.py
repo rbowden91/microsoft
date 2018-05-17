@@ -36,7 +36,7 @@ parser.add_argument('-n', '--num_files', help='number of files to train on (defa
 parser.add_argument('-d', '--dependencies', help='forward/reverse | left_sibling/parent/left_prior | '
                                            'children/right_sibling/right_prior',
                                             type=lambda s: s.split())
-parser.add_argument('-e', '--epochs', help='how many epochs', type=int)
+parser.add_argument('-e', '--max_max_epoch', help='how many epochs', type=int)
 parser.add_argument('--profile', help='enable graph profiling (default false)', action="store_true")
 parser.add_argument('--checkpoint', help='attempts to resume training from a checkpoint file (default false)', action="store_true")
 
@@ -185,6 +185,7 @@ class Trainer():
             "loss": model.fetches['loss'],
             "probabilities": model.fetches['loss'],
         }
+        """
         if mode == 'train':
             fetches["train"] = model.ops['train_joint']
         epoch_step = self.epoch_step
@@ -206,6 +207,7 @@ class Trainer():
                         print("\t%s %s loss: %.3f\tperplexity: %.3f\taverage perplexity: %.3f" %
                             (d, k, loss, np.exp(loss), np.exp(total_loss[d][k] / (epoch_step + 1))))
             epoch_step += 1
+        """
 
         # for now, save after very epoch
         self.saver.save(self.session, os.path.join(self.config['checkpoint_dir'], 'model'))#, global_step)
@@ -313,6 +315,8 @@ def main(_):
         # we don't want to override the 'config' defaults
         if args.batch_size is None:
             del(args.batch_size)
+        if args.max_max_epoch is None:
+            del(args.max_max_epoch)
 
         if args.dependencies is None:
             args.dependencies = ['forward'] if args.model == 'linear' else ['left_sibling']
@@ -336,10 +340,6 @@ def main(_):
         if args.num_files is not None:
             config['num_files'] = min(args.num_files, config['num_files'])
         del(args.num_files)
-
-        if args.epochs is not None:
-            config['max_max_epoch'] = args.epochs
-        del(args.epochs)
 
         config.update(get_config())
         config.update(vars(args))

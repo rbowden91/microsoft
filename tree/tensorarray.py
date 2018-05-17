@@ -127,15 +127,19 @@ class RNNTensorArrayCell():
             # reconstruct the LSTM state of the dependency from the TensorArray
             old_state = self.get_lstm_state(data, dependency_idx)
             with tf.variable_scope(self.scope):
-                (output, new_state) = self.cell(inp, old_state)
+                (new_output, new_state) = self.cell(inp, old_state)
 
             if add_idx is not None:
                 add_state = self.get_lstm_state(data, add_idx)
                 new_state.c += add_state.c
                 new_state.h += add_state.h
 
+                new_output = tf.matmul(new_output, self.u_child)
+                add_output = self.get_output(data, add_idx)
+                new_output += add_output
+
             self.save_lstm_state(data, ctr, new_state)
-            self.save_output(data, ctr, output)
+            self.save_output(data, ctr, new_output)
 
         def stack_output(self, data):
             return self.array.stack(data[self.dependency][self.layer]['output'])
@@ -183,6 +187,8 @@ class RNNTensorArrayCell():
                 with tf.variable_scope(self.rnn[i][j].scope):
                     initial = tf.get_variable('lstm_initial_output', [1, hidden_size], data_type) \
                               if j == self.num_layers - 1 else tf.zeros([1, hidden_size], data_type)
+                    if i == 'children':
+                        self.u_child = tf.get_variable('U_child', [1, hidden_size, hidden_size], dtype=data_type())
                     # initial state
                     self.rnn[i][j].save_lstm_state(self.data, 0, tf.contrib.rnn.LSTMStateTuple(
                         tf.get_variable('lstm_state_c', [1, hidden_size], data_type),
