@@ -8,7 +8,9 @@ from queue import Queue
 from threading import Thread, Lock
 from pycparser import parse_file, c_parser, c_generator, c_ast, c_lexer
 from subprocess import Popen, PIPE
+
 from renamer import IDRenamer
+from normalize import RemoveDecls
 
 cpp_args = ['-E', '-P', '-D__extension__=', '-D__attribute__(x)=', '-D__nonnull(x)=', '-D__restrict=',
             '-D__THROW=', '-D__volatile__=', '-D__asm__(x)=', '-D__STRING_INLINE=', '-D__inline=']
@@ -95,13 +97,16 @@ def preprocess_c(filename, options=None, include_dependencies=False):
     except Exception as e:
         print('uh oh', e, filename)
         return None
-    generator = IDRenamer(False)
-    renamed_code = generator.visit(ast)
+    remove_decls = RemoveDecls()
+    ast = remove_decls.visit(ast)
+
+    id_renamer = IDRenamer(False)
+    renamed_code = id_renamer.visit(ast)
 
     # have to make sure we never try to parse something that has had typedefs removed. definitely a better way of doing
     # this
-    generator.remove_typedefs = True
-    typedef_removed_code = generator.visit(ast)
+    id_renamer.remove_typedefs = True
+    typedef_removed_code = id_renamer.visit(ast)
     linear_tokens = lex_code(typedef_removed_code)
 
     try:
@@ -112,7 +117,7 @@ def preprocess_c(filename, options=None, include_dependencies=False):
         return None
 
     #generator.remove_typedefs = True
-    ast_nodes, node_properties = dump_ast.linearize_ast(ast, generator, include_dependencies=include_dependencies)
+    ast_nodes, node_properties = dump_ast.linearize_ast(ast, id_renamer, include_dependencies=include_dependencies)
     return ast_nodes, ast, node_properties, linear_tokens
 
 def tokens_to_ids(tokens, token_to_id, string_check, include_token):

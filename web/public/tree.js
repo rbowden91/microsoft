@@ -1,8 +1,6 @@
-function drawTree(treeData) {
-    $('#heatmap').html('<div id="expectation"></div>');
-
+function drawTree(treeData, redraw) {
+    config = treeData.config;
     // set the dimensions and margins of the diagram
-    // XXX globals!!
     margin = {top: 40, right: 90, bottom: 50, left: 90},
         width =  3500 - margin.left - margin.right,
         height = 1500 - margin.top - margin.bottom;
@@ -30,7 +28,6 @@ function drawTree(treeData) {
     // maps the node data to the tree layout
     nodes = treemap(nodes);
 
-
     // adds the links between the nodes
     var link = g.selectAll(".link")
 	.data( nodes.descendants().slice(1))
@@ -43,7 +40,11 @@ function drawTree(treeData) {
 	    + " " + d.parent.x + "," + d.parent.y;
 	})
 	.attr("style", function(d) {
-	    return "stroke:" + gradient(grad, 1-d.data.forward.last_sibling_actual)
+	    d = d.data[config[0]][config[1]]
+	    if (typeof(d.last_sibling) !== 'undefined')
+                return "stroke:" + gradient(grad, 1-d.last_sibling.expected);
+	    else if (typeof(d.first_sibling) !== 'undefined')
+                return "stroke:" + gradient(grad, 1-d.first_sibling.expected);
 	});
 
     // adds each node as a group
@@ -61,7 +62,7 @@ function drawTree(treeData) {
     .attr('class', 'node-circle')
     .attr("r", 10)
     .attr('style', function(d) {
-	return 'stroke:' + gradient(grad, d.data.forward.label_index_ratio)
+	return 'stroke:' + gradient(grad, d.data[config[0]][config[1]].label_index.ratio);
     })
     // 	function() {
     // 	$('#expectation').hide();
@@ -74,7 +75,10 @@ function drawTree(treeData) {
     .style("text-anchor", "middle")
     .text(function(d) { return d.data.attr; })
     .style("stroke", function(d) {
-    	return '#' + gradient(grad, d.data.forward.attr_index_ratio)
+        if (typeof(d.data[config[0]][config[1]].attr_index) !== 'undefined')
+            return '#' + gradient(grad, d.data[config[0]][config[1]].attr_index.ratio);
+        else
+            return '#000000';
     });
 
     node.append("text")
@@ -83,19 +87,7 @@ function drawTree(treeData) {
     .style("text-anchor", "middle")
     .text(function(d) { return d.data.label; })
     .on('click', function(d) {
-    	expectation = '';
-    	keys = Object.keys(d.data).sort()
-    	for (var i = 0; i < keys.length; i++) {
-            if (typeof d.data[keys[i]] === 'object') {
-                for (var j in d.data[keys[i]]) {
-                    expectation += htmlEncode(keys[i] + ' ' + j) + ': ' + htmlEncode(d.data[keys[i]][j]) + '<br>';
-                }
-            } else {
-                expectation += htmlEncode(keys[i]) + ': ' + htmlEncode(d.data[keys[i]]) + '<br>';
-            }
-	}
-	$('#expectation').html(expectation);
-        $('#expectation').css({top: d.y-100 , left: d.x - 100 }).show();
+        return redraw(d.data);
     });
 
     //var tip = d3.tip()

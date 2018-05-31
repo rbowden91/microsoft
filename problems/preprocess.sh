@@ -1,7 +1,7 @@
 #!/bin/bash
 declare -A arr=()
 
-for i in greedy; do #mario recover resize dictionary vigenere; do
+for i in vigenere; do #mario recover resize dictionary vigenere; do
     cd $i
     pushd .
     for k in *; do

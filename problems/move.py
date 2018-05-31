@@ -40,7 +40,7 @@ elif output['compiles']:
         directory = 'compiles_fixed'
     # only compiled with empty headers
     elif output['parse3']:
-        directory = 'compiles_empty_' + passed
+        directory = 'compiles_empty'
     else:
         directory = 'compiles_invalid'
 # incorrect, but parses

@@ -10,15 +10,14 @@ import json
 import os
 import preprocess
 import re
-
-from pycparser import c_parser, c_ast, parse_file
-
 import numpy as np
 import tensorflow as tf
 import queue as Q
-#import check_correct
 
+#import check_correct
 import dump_ast
+from model import joint_configs
+from pycparser import c_parser, c_ast, parse_file
 
 flags = tf.flags
 logging = tf.logging
@@ -118,8 +117,9 @@ def print_ast(ast, node_properties):
     }
     props = node_properties[ast]
     for k in props:
-        if k in ['self', 'dependencies']:
+        if k in ['self', 'dependencies', 'cells']:
             continue
+
         output[k] = props[k]
 
     children = ast.children()
@@ -129,12 +129,142 @@ def print_ast(ast, node_properties):
             output['children'].append(ret)
     return output
 
-def run_epoch(session, graph, config, tokens, raw_data, node_properties=None):
+def feed_dict_filler(feed_dict, dependency, initial_names, initial_values):
+    if isinstance(initial_names, dict):
+        for k in initial_names:
+            feed_dict_filler(feed_dict, dependency[k] if dependency is not None else None, initial_names[k], initial_values[k])
+    elif isinstance(initial_names, list):
+        for k in range(len(initial_names)):
+            feed_dict_filler(feed_dict, dependency[k] if dependency is not None else None, initial_names[k], initial_values[k])
+    else:
+        feed_dict[initial_names] = dependency if dependency is not None else initial_values
+
+def subtree(session, config, raw_data, dependencies):
+
+    # TODO: clean this up. really, it's three steps. first, we need to find the label index. then attr_index. then, we need
+    # to calculate the state and output given that index
+
+    # TODO: can we get rid of this if all we fetch are probabilities?
+    data_dict = {}
+    for k in config['features']:
+        data_dict[config['features'][k]] = [[0, 0]]
+    session.run(config['tensor_iter'], data_dict)
+
+    feed_dict = config['feed_dict'].copy()
+    feed_dict_filler(feed_dict, dependencies, config['initials'], config['initial_values'])
+    vals = session.run(config['fetches'], feed_dict)
+
+    props = { 'children': [], 'cells': {} }
+
+    # TODO: this should use a specific direction, but also check if things are fine coming from the
+    # other directions?
+    for dconfig in vals:
+        for dependency in vals[dconfig]:
+            probs = vals[dconfig][dependency]['probabilities']['label_index'][0][1]
+            rank = np.flip(np.argsort(probs), 0)
+            props['label_index'] = {}
+            props['label_index']['expected'] = raw_data['label_index_to_token'][rank[0]]
+            props['label_index']['expected_index'] = rank[0]
+            props['label_index']['expected_probability'] = float(probs[rank[0]])
+            props['label_index']['probabilities'] = [(float(probs[j]), raw_data['label_index_to_token'][j]) for j in rank]
+
+    data_dict = {}
+    for k in config['features']:
+        val = props[k]['expected_index'] if k in ['label_index'] else 0
+        data_dict[config['features'][k]] = [[0, val]]
+    session.run(config['tensor_iter'], data_dict)
+    vals = session.run(config['fetches'], feed_dict)
+
+    for dconfig in vals:
+        for dependency in vals[dconfig]:
+            probs = vals[dconfig][dependency]['probabilities']['attr_index'][0][1]
+            rank = np.flip(np.argsort(probs), 0)
+            props['attr_index'] = {}
+            props['attr_index']['expected'] = raw_data['attr_index_to_token'][rank[0]]
+            props['attr_index']['expected_index'] = rank[0]
+            props['attr_index']['expected_probability'] = float(probs[rank[0]])
+            props['attr_index']['probabilities'] = [(float(probs[j]), raw_data['attr_index_to_token'][j]) for j in rank]
+
+    data_dict = {}
+    for k in config['features']:
+        val = props[k]['expected_index'] if k in ['label_index', 'attr_index'] else 0
+        data_dict[config['features'][k]] = [[0, val]]
+    session.run(config['tensor_iter'], data_dict)
+    vals = session.run(config['fetches'], feed_dict)
+
+    for dconfig in vals:
+        props['cells'][dconfig] = {}
+        for dependency in vals[dconfig]:
+            props['cells'][dconfig][dependency] = prop = {}
+            for k in vals[dconfig][dependency]['cells']:
+                prop[k] = {
+                    'output': [vals[dconfig][dependency]['cells'][k]['output'][0][1]],
+                    'states': []
+                }
+                for layer in range(config['num_layers']):
+                    prop[k]['states'].append({
+                        'c': [vals[dconfig][dependency]['cells'][k]['states'][layer]['c'][0][1]],
+                        'h': [vals[dconfig][dependency]['cells'][k]['states'][layer]['h'][0][1]]
+                    })
+            for k in vals[dconfig][dependency]['probabilities']:
+                probs = vals[dconfig][dependency]['probabilities'][k][0][1]
+                rank = np.flip(np.argsort(probs), 0)
+                if k not in ['label_index', 'attr_index']:
+                    props[k] = {'expected': float(probs)}
+
+
+    # TODO: return can also fit here, but only if type is void
+    # TODO: gather these from code rather than hard-coding
+    print(props['label_index']['expected'], props['attr_index']['expected'], props['label_index']['expected_probability'])
+    if props['label_index']['expected'] not in ['Break', 'Continue', 'ID', 'Constant', 'IdentifierType']:
+        while True:
+            child_dependencies = {}
+            for dconfig in vals:
+                child_dependencies[dconfig] = {}
+                for dependency in vals[dconfig]:
+                    child_dependencies[dconfig][dependency] = {
+                        'parent': props['cells'][dconfig][dependency]['parent'],
+                        'left_sibling': props['children'][-1]['cells'][dconfig][dependency]['left_sibling'] \
+                                        if len(props['children']) > 0 else None
+                    }
+            print('down')
+            child_props = subtree(session, config, raw_data, child_dependencies)
+            print('up')
+            props['children'].append(child_props)
+            if child_props['last_sibling']['expected'] > 0.5:
+                break
+
+    return props
+
+def step(session, config, tokens, raw_data, node_properties=None):
+
+    token = tokens[2]
+
+    dependencies = {}
+
+    feed_dict = config['feed_dict'].copy()
+    for dconfig in config['initials']:
+        dependencies[dconfig] = {}
+        for dependency in config['initials'][dconfig]:
+            dependencies[dconfig][dependency] = {}
+            for k in config['initials'][dconfig][dependency]:
+                d = node_properties[token['self']]['dependencies'][k]
+                if d is not None:
+                    d = node_properties[d]['cells'][dconfig][dependency][k]
+                dependencies[dconfig][dependency][k] = d
+
+    subtree(session, config, raw_data, dependencies)
+
+
+
+
+
+def run_epoch(session, config, tokens, raw_data, node_properties=None):
 
     data_dict = {}
     if config['model'] == 'linear':
         for k in config['features']:
-            p = config['placeholders']['features'][k]
+            p = config['features'][k]
             if k == 'left_sibling':
                 data_dict[p] = [[0] + list(range(len(tokens) - 1))]
             elif k == 'right_sibling':
@@ -147,59 +277,83 @@ def run_epoch(session, graph, config, tokens, raw_data, node_properties=None):
                 data_dict[p] = [[0] * len(tokens)]
     else:
         for k in config['features']:
-            p = config['placeholders']['features'][k]
+            p = config['features'][k]
             data_dict[p] = [[0]]
         for token in tokens:
             for (name, val) in token['attrs']:
                 if name in ['value', 'op', 'name']:
                     # TODO just look up directly, and do the string check, too
                     token['attr'] = val
-                    token['attr_index'] = preprocess.tokens_to_ids([val], raw_data['attr_to_id'],
-                                                True, False)[0]
                     break
             else:
-                token['attr_index'] = raw_data['attr_to_id']['<no_attr>']
+                token['attr'] = '<no_attr>'
+            token['attr_index'] = preprocess.tokens_to_ids([token['attr']], raw_data['attr_to_id'], True, False)[0]
             token['label_index'] = raw_data['label_to_id'][token['label']]
             token['mask'] = 1
             for k in config['features']:
-                p = config['placeholders']['features'][k]
+                p = config['features'][k]
                 data_dict[p][0].append(token[k])
 
 
-    session.run(config['ops']['node_iter'], data_dict)
+    session.run(config['tensor_iter'], data_dict)
 
-    feed_dict = {
-        config['placeholders']['is_inference']: False
-    }
-    vals = session.run(config['fetches']['loss'], feed_dict)
+    vals = session.run(config['fetches'], config['feed_dict'])
+    for k in config['feed_dict']:
+        config['feed_dict'][k] = True
 
     props = node_properties if node_properties is not None else []
     for i in range(len(tokens)):
         token = tokens[i][1] if config['model'] == 'linear' else tokens[i]['label']
-        prop = {}
-        for direction in vals:
-            prop[direction] = p = {'token': token}
-            for k in vals[direction]:
-                if i == 0:
-                    print('{} {} perplexity: {}'.format(direction, k, np.exp(vals[direction][k]['loss'])))
-                probs = vals[direction][k]['probabilities'][0][i+1]
-                if direction == 'joint':
-                    p['alpha'] = alpha = float(probs[0])
-                    probs = alpha * vals['forward'][k]['probabilities'][0][i+1] + \
-                            (1-alpha) * vals['reverse'][k]['probabilities'][0][i+1]
+        prop = {'label': token, 'cells': {}}
+        for dconfig in vals:
+            prop[dconfig] = {}
+            prop['cells'][dconfig] = {}
+            for dependency in vals[dconfig]:
+                prop['cells'][dconfig][dependency] = {}
+                for k in vals[dconfig][dependency]['cells']:
+                    prop['cells'][dconfig][dependency][k] = {
+                        'output': [vals[dconfig][dependency]['cells'][k]['output'][0][i+1]],
+                        'states': []
+                    }
+                    for layer in range(config['num_layers']):
+                        prop['cells'][dconfig][dependency][k]['states'].append({
+                            'c': [vals[dconfig][dependency]['cells'][k]['states'][layer]['c'][0][i+1]],
+                            'h': [vals[dconfig][dependency]['cells'][k]['states'][layer]['h'][0][i+1]]
+                        })
 
-                target = data_dict[config['placeholders']['features'][k]][0]
-                rank = np.flip(np.argsort(probs), 0)
-                if k in ['label_index', 'attr_index']:
-                    p[k + '_expected'] = raw_data[k + '_to_token'][rank[0]]
-                    p[k + '_actual'] = raw_data[k + '_to_token'][target[i+1]]
-                    p[k + '_expected_probability'] = float(probs[rank[0]])
-                    p[k + '_actual_probability'] = float(probs[target[i+1]])
-                    p[k + '_ratio'] = float(probs[target[i+1]] / (probs[rank[0]]))
-                    p['probabilities'] = [(float(probs[j]), raw_data[k+'_to_token'][j]) for j in rank]
-                else:
-                    p[k + '_expected'] = target[i+1]
-                    p[k + '_actual'] = float(probs)
+                prop[dconfig][dependency] = {}
+                for k in vals[dconfig][dependency]['loss']:
+                    if i == 0:
+                        print('{} {} {} perplexity: {}'.format(dconfig, dependency,
+                                k, np.exp(vals[dconfig][dependency]['loss'][k])))
+
+                    prop[dconfig][dependency][k] = p = {}
+
+                    probs = vals[dconfig][dependency]['probabilities'][k][0]
+                    target = data_dict[config['features'][k]][0]
+                    if dconfig == 'joint_configs':
+                        p['alpha'] = alpha = probs[i+1].tolist()
+                        sum_probs = 0
+                        for jd in range(len(joint_configs[config['model']][dependency])):
+                            joint_dependency = joint_configs[config['model']][dependency][jd]
+                            probs = vals['dependency_configs'][joint_dependency][k]['probabilities'][0][i+1]
+                            sum_probs += alpha[jd] * probs
+                        probs = sum_probs
+                        #p['actual'] = target[i+1]
+                        #p['expected'] = float(probs)
+                    if k in ['label_index', 'attr_index']:
+                        if dconfig != 'joint_configs':
+                            probs = probs[i+1]
+                        rank = np.flip(np.argsort(probs), 0)
+                        p['expected'] = raw_data[k + '_to_token'][rank[0]]
+                        p['actual'] = raw_data[k + '_to_token'][target[i+1]]
+                        p['expected_probability'] = float(probs[rank[0]])
+                        p['actual_probability'] = float(probs[target[i+1]])
+                        p['ratio'] = float(probs[target[i+1]] / (probs[rank[0]]))
+                        p['probabilities'] = [(float(probs[j]), raw_data[k+'_to_token'][j]) for j in rank]
+                    else:
+                        p['actual'] = target[i+1]
+                        p['expected'] = float(probs[i+1])
 
         if node_properties is None:
             props.append(prop)
@@ -215,6 +369,29 @@ def main(_):
     best_dir = os.path.join(FLAGS.data_path, 'best')
     with open(os.path.join(best_dir, 'config.json')) as f:
         config = json.load(f)
+
+    # we have to find the model that we can feed...
+    config['fetches'] = fetches = {}
+    config['initials'] = initials = {}
+    config['feed_dict'] = feed = {}
+    for d in config['models']:
+        fetches[d] = {}
+        initials[d] = {}
+        for i in config['models'][d]:
+            feed[config['models'][d][i]['placeholders']['is_inference']] = False
+            fetches[d][i] = config['models'][d][i]['fetches']
+            initials[d][i] = {}
+            for j in config['models'][d][i]['initials']:
+                initials[d][i][j] = config['models'][d][i]['initials'][j]
+            for j in config['models'][d][i]['placeholders']:
+                if 'features' == j:
+                    config['features'] = config['models'][d][i]['placeholders'][j]
+                    config['tensor_iter'] = config['models'][d][i]['ops']['tensor_iter']
+
+    if 'features' not in config:
+        print('yikes')
+        sys.exit(0)
+
     # fix windows path separators
     config['data_path'] = os.path.join(*config['data_path'].split('\\'))
 
@@ -238,6 +415,8 @@ def main(_):
         with tf.Session() as session:
             saver.restore(session, os.path.join(best_dir, 'model'))
 
+            config['initial_values'] = session.run(config['initials'])
+
             parser = c_parser.CParser()
             while True:
                 task_path = os.path.join(FLAGS.task_path, config['model'])
@@ -245,18 +424,28 @@ def main(_):
                     if filename.startswith('.'):
                         continue
                     filepath = os.path.join(task_path, filename)
-                    with open(filepath) as f:
-                        text = f.read()
-                    directives, _ = preprocess.grab_directives(text)
-                    # XXX this can return None
-                    ast_nodes, ast, node_properties, tokens = preprocess.preprocess_c(filepath,
-                            include_dependencies=True)
+                    try:
+                        with open(filepath) as f:
+                            text = f.read()
+                        directives, _ = preprocess.grab_directives(text)
+                        # XXX this can return None
+                        ast_nodes, ast, node_properties, tokens = preprocess.preprocess_c(filepath,
+                                include_dependencies=True)
+                    except Exception(e):
+                        print(e)
+                        try:
+                            os.unlink(filepath)
+                        except FileNotFoundError:
+                            pass
+                        # report some kind of error!
+                        continue
 
                     if config['model'] == 'ast':
                         # Can't add attributes directly to Nodes because the class uses __slots__, so use this dictionary to
                         # extend objects
                         #run_ast_epoch(session, graph, config, ast, ast_nodes, node_properties, raw_data)
-                        run_epoch(session, graph, config, ast_nodes, raw_data, node_properties)
+                        run_epoch(session, config, ast_nodes, raw_data, node_properties)
+                        step(session, config, ast_nodes, raw_data, node_properties)
                         code = "blah"#search(ast, node_properties, filename, directives)
                         output = {
                             'ast': print_ast(ast, node_properties),

@@ -1,5 +1,7 @@
 *.zip
 *.ipynb
+log
+c2
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

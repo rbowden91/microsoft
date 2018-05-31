@@ -1,2 +1,0 @@
- ../problems/vigenere_old/correct15/2772ae9c33b2430f980f54c3261f5136/vigenere.c
-../problems/vigenere_old/correct15/180e6a8ab01f4a07b88782513b7c1b7c/vigenere.c

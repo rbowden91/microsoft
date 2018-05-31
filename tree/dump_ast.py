@@ -98,7 +98,7 @@ def linearize_ast_helper(ast, generator, ret, parent=0, sibling=0, prior=0, firs
         }
 
     if parent != 0:
-        if ret[parent-1]['left_child'] is None:
+        if ret[parent-1]['left_child'] == 0:
             ret[parent-1]['left_child'] = my_node_num
             if include_dependencies:
                 ret[parent-1]['dependencies']['left_child'] = ast

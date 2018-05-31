@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for i in caesar; do # credit greedy mario recover resize dictionary vigenere; do
+for i in mario; do # credit greedy mario recover resize dictionary vigenere; do
     cd $i
     for k in *; do
 	if [[ -f $k ]]; then continue; fi

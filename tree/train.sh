@@ -1,1 +1,1 @@
-python3 train.py -n100 -b2
+python3 train.py -n100 -b1 -mast -d"d2" -e1 -f

@@ -14,51 +14,57 @@
     <script src="heatmap.js"></script>
 
     <style>
-      .node circle {
-        fill: #fff;
-        stroke: steelblue;
-        stroke-width: 6px;
-      }
+        .node circle {
+            fill: #fff;
+            stroke: steelblue;
+            stroke-width: 6px;
+        }
 
-      .node text { font: 12px sans-serif; }
+        .node text { font: 12px sans-serif; }
 
-      .node--internal text {
-        text-shadow: 0 1px 0 #fff, 0 -1px 0 #fff, 1px 0 0 #fff, -1px 0 0 #fff;
-      }
+        .node--internal text {
+            text-shadow: 0 1px 0 #fff, 0 -1px 0 #fff, 1px 0 0 #fff, -1px 0 0 #fff;
+        }
 
-      .link {
-        fill: none;
-        stroke: #ccc;
-        stroke-width: 2px;
-      }
-
-
+        .link {
+            fill: none;
+            stroke: #ccc;
+            stroke-width: 2px;
+        }
 
 
-      #code, #linear_heatmap{
-      	  border: 1px solid black;
-      	  width: 700px;
-	  white-space: pre-wrap;       /* css-3 */
-	  white-space: -moz-pre-wrap;  /* Mozilla, since 1999 */
-	  white-space: -pre-wrap;      /* Opera 4-6 */
-	  white-space: -o-pre-wrap;    /* Opera 7 */
-	  word-wrap: break-word;       /* Internet Explorer 5.5+ */
-	  float: left;
-	  font-family: monospace;
-      }
+        #expectation {
+            white-space: pre;
+            font-family: monospace;
+            font:14px;
+        }
 
-      #expectation {
-      	  /*position: absolute;*/
-      	  /*display: none;*/
-      	  background-color: white;
-	  border: 1px solid black;
-	  /*height: 150px;*/
-      }
 
-      #submit-div {
-      	  width:100%;
-      	  padding-top:100px;
-      }
+        #code, #linear_heatmap{
+            border: 1px solid black;
+            width: 700px;
+            white-space: pre-wrap;       /* css-3 */
+            white-space: -moz-pre-wrap;  /* Mozilla, since 1999 */
+            white-space: -pre-wrap;      /* Opera 4-6 */
+            white-space: -o-pre-wrap;    /* Opera 7 */
+            word-wrap: break-word;       /* Internet Explorer 5.5+ */
+            float: left;
+            font-family: monospace;
+        }
+
+        #expectation {
+            /*position: absolute;*/
+            /*display: none;*/
+            background-color: white;
+            border: 1px solid black;
+            float: left;
+            /*height: 150px;*/
+        }
+
+        #submit-div {
+            width:100%;
+            padding-top:100px;
+        }
 
     </style>
   </head>
@@ -71,10 +77,9 @@
 	</form>
     </div>
     <div id="code" contenteditable="true"></div>
-    <div id="fixed_code"></div>
-    <div style="clear:both"></div>
+    <!--<div id="fixed_code"></div>-->
     <div id="expectation"></div>
-    <div id="linear_heatmap"></div>
+    <div style="clear:both"></div>
     <div id="heatmap"></div>
   </body>
 </html>
