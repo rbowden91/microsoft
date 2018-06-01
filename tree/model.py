@@ -15,55 +15,7 @@ from tensorarray import RNNTensorArray, RNNTensorArrayCell, define_scope
 def data_type():
     return tf.float32
 
-valid_dependencies = {
-    'children': 'bottom',
-    'parent': 'top',
-    'left_prior': 'left',
-    'left_child': 'left',
-    'left_sibling': 'left',
-    'right_prior': 'right',
-    'right_child': 'right',
-    'right_sibling': 'right',
-}
-
-# TODO: validate the dependency_configs against valid_dependencies
-dependency_configs = {
-    'ast': {
-        # should never need to have a dependency appear twice in the list
-        'left_sibling': [('top', 'left', ['left_sibling'])],
-        'children': [('bottom', 'right', ['children'])],
-        'parent': [('top', 'left', ['parent'])],
-        'd1': [('bottom', 'right', ['children', 'right_sibling'])],
-        'd2': [('top', 'left', ['parent', 'left_sibling'])],
-        #'d3': [('bottom_right', [
-        #{ 'bottom_right': [['children'], ['right_children'],
-        #                   ['children', 'initial_right_children']]},
-        #{ 'bottom_left': [['left_children'],
-        #                   ['children', 'initial_left_children'],
-        #                   ['children', 'initial_left_children', 'initial_right_children']]},
-        #{ 'top_left': [['parent', 'left_sibling'],
-        #               ['parent', 'left_sibling', 'initial_left_children'],
-        #               ['parent', 'left_sibling', 'initial_left_children', 'initial_right_children']]},
-        #{ 'top_right': [['parent', 'right_sibling'],
-        #               ['parent', 'right_sibling', 'initial_right_children'],
-        #               ['parent', 'right_sibling', 'initial_left_children', 'initial_right_children']]}
-    },
-    'linear': {
-        'reverse': [('bottom', 'right', ['right_sibling'])],
-        'forward': [('top', 'left', ['left_sibling'])],
-        'both': [('top', 'left', ['left_sibling']), ('bottom', 'right', ['right_sibling'])]
-    }
-}
-
-# TODO: similarly, validate the possible_joints are found in dependency_configs
-joint_configs = {
-    'ast': {
-        'j1': ['d1', 'd2']
-    },
-    'linear': {
-        'both': [ 'forward', 'reverse' ]
-    }
-}
+from config import dependency_configs, joint_configs
 
 
 class TRNNBaseModel(object):
@@ -103,7 +55,8 @@ class TRNNBaseModel(object):
     def calculate_loss_and_tvars(self, labels, logits):
         loss = {}
         probabilities = {}
-        mask = tf.cast(self.rows['mask'], tf.float32)
+        # mask is the same regardless of direction
+        mask = tf.cast(self.rows['forward']['mask'], tf.float32)
         num_tokens = tf.reduce_sum(mask)
         total_loss = 0.0
         for k in labels:
@@ -143,11 +96,8 @@ class TRNNBaseModel(object):
         # inference/node dataset
         batch_size = tf.cast(self.batch_size, tf.int64)
         # batch size should always be 1 here anyway
-        def densify(example):
-            return { k: tf.sparse_tensor_to_dense(example[k]) for k in example }
         dataset = tf.data.Dataset.from_tensor_slices(placeholders['features']) \
                                                     .batch(batch_size)
-                                                    #.map(densify) \
         iter_ops['tensor_iter'] = iterator.make_initializer(dataset)
 
         # training/file dataset
@@ -205,18 +155,28 @@ class TRNNBaseModel(object):
             if rows is None:
                 self.batch_size = batch_size = tf.get_variable('batch_size', initializer=1, trainable=False, dtype=tf.int32)
                 self.placeholders['drop_prob'] = tf.placeholder_with_default(0.0, shape=(), name='dropout_placeholder')
-                self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
+                #self.placeholders['is_inference'] = tf.placeholder(tf.bool, [], name='is_inference_placeholder')
                 self.placeholders['new_batch_size'] = new_batch_size = tf.placeholder(tf.int32, shape=[], name='new_batch_size')
                 self.ops['batch_size_update'] = tf.assign(batch_size, new_batch_size)
                 self.rows, iter_ops, iter_placeholders = self.init_iterator()
                 self.placeholders.update(iter_placeholders)
                 self.ops.update(iter_ops)
-            else:
-                self.rows = rows
+                # this is to handle the fact that we couldn't do a nested dictionary in preprocessing
+                rows = {
+                    'forward': {},
+                    'reverse': {}
+                }
+                for k in self.rows:
+                    split = k.split('_')
+                    direction = split.pop(0)
+                    rest = '_'.join(split)
+                    rows[direction][rest] = self.rows[k]
+
+            self.rows = rows
 
             # num_rows does not always equal batch size, if we got a small batch
-            self.num_rows = tf.shape(self.rows['label_index'])[0]
-            self.data_length = tf.shape(self.rows['label_index'])[1]
+            self.num_rows = tf.shape(self.rows['forward']['label_index'])[0]
+            self.data_length = tf.shape(self.rows['forward']['label_index'])[1]
             self.params = self.declare_params()
 
             self.global_step = tf.get_variable('global_step', dtype=tf.int32, initializer=0, trainable=False)
@@ -313,7 +273,7 @@ class TRNNModel(TRNNBaseModel):
     @define_scope
     def collect_logits(self):
 
-        h_pred, left_right = self.calculate_hpred()
+        h_pred, direction, forward_array = self.calculate_hpred()
         p = self.params
 
         logits = {}
@@ -325,29 +285,30 @@ class TRNNModel(TRNNBaseModel):
 
         # this is the only directional loss that linear uses
         logits['label_index'] = tf.matmul(h_pred, tile(p['label_w'])) + p['label_b']
-        labels['label_index'] = self.rows['label_index']
+        labels['label_index'] = self.rows[direction]['label_index']
 
         if self.model == 'ast':
             # only attrs for constants and IDs?
-            attr_w = tf.gather(p['attr_w'], self.rows['label_index'])
-            attr_b = tf.gather(p['attr_b'], self.rows['label_index'])
+            attr_w = tf.gather(p['attr_w'], self.rows[direction]['label_index'])
+            attr_b = tf.gather(p['attr_b'], self.rows[direction]['label_index'])
             logits['attr_index'] = tf.squeeze(tf.matmul(tf.expand_dims(h_pred, axis=2), attr_w), axis=2) + attr_b
-            labels['attr_index'] = self.rows['attr_index']
+            labels['attr_index'] = self.rows[direction]['attr_index']
 
             # loss for whether we are the last sibling on the left or right
-            end = 'last_sibling' if left_right == 'left' else 'first_sibling'
-            u_end = tf.gather_nd(p['u_end'], tf.stack([self.rows['label_index'], self.rows['attr_index']], axis=2))
+            end = 'last_sibling' if (direction == 'forward') == forward_array else 'first_sibling'
+            #print(self.rows)
+            u_end = tf.gather_nd(p['u_end'], tf.stack([self.rows[direction]['label_index'], self.rows[direction]['attr_index']], axis=2))
             # TODO: bias?
             logits[end] = tf.reduce_sum(tf.multiply(u_end, h_pred), axis=2)
-            labels[end] = tf.cast(self.rows[end], data_type())
+            labels[end] = tf.cast(self.rows[direction][end], data_type())
 
 
         return labels, logits
 
     @define_scope
-    def embed(self, index):
-        label_index = self.gather_dependency('label_index', index)
-        attr_index = self.gather_dependency('attr_index', index)
+    def embed(self, index, direction, parent=False):
+        label_index = self.rows[direction]['label_index' if not parent else 'parent_label_index'][:,index]
+        attr_index = self.rows[direction]['attr_index' if not parent else 'parent_attr_index'][:,index]
 
         node_label_embedding = tf.gather(self.params['label_embed'], label_index, name="LabelEmbedGather", axis=0)
         node_attr_embedding = tf.gather(self.params['attr_embed'], attr_index, name="AttrEmbedGather", axis=0)
@@ -399,81 +360,70 @@ class TRNNModel(TRNNBaseModel):
 
         return params
 
-    def generate_loop_cond(self, left_right):
+    def generate_loop_cond(self, forward_array):
         def loop_cond (ctr, cell_data):
-            if left_right == 'left':
+            if forward_array:
                 return tf.less(ctr, self.data_length)
             else:
                 return tf.greater(ctr, 0)
         return loop_cond
 
-    def gather_dependency(self, dependency, idx):
-        if len(idx.shape) == 0:
-            return self.rows[dependency][:,idx]
-        assert len(idx.shape) == 1
-        r = tf.range(tf.size(idx))
-        return tf.gather_nd(self.rows[dependency], tf.stack([r, idx], axis=1))
-
-
-    def generate_loop_body(self, dependencies, layer):
-        def get_input(cell_data, dependency, idx):
-            return self.embed(idx) if layer == 0 \
-                   else self.cells.rnn[dependency][layer-1].get_output(cell_data, idx)
+    def generate_loop_body(self, dependencies, direction, forward_array, layer):
         def loop_body(ctr, cell_data):
-            for dependency in dependencies[2]:
-                inp = get_input(cell_data, dependency, ctr)
+            gather_dependency = lambda dependency: self.rows[direction][dependency][:, ctr]
+            def get_input(idx, parent=False):
+                return self.embed(ctr, direction, parent) if layer == 0 \
+                    else self.cells.rnn[dependency][layer-1].get_output(cell_data, idx)
+
+            for dependency in dependencies:
+                inp = get_input(ctr)
 
                 if dependency != 'children':
-                    dependency_idx = self.gather_dependency(dependency, ctr)
+                    dependency_idx = gather_dependency(dependency)
                     add_idx = None
                 else:
-                    dependency_idx = self.gather_dependency('left_child', ctr)
+                    dependency_idx = gather_dependency('left_child')
 
-                    # TODO: this is currently handled
-                    parent_idx = self.gather_dependency('parent', ctr)
-                    parent_inp = get_input(cell_data, dependency, parent_idx)
+                    parent_idx = gather_dependency('parent')
+                    parent_inp = get_input(parent_idx, parent=True)
                     inp = tf.stack([inp, parent_inp])
 
-                    right_sibling = self.gather_dependency('right_sibling', ctr)
+                    right_sibling = gather_dependency('right_sibling')
                     add_idx = right_sibling if layer == self.num_layers - 1 else None
 
+                #ctr = tf.Print(ctr, [ctr, dependency_idx, self.rows[direction]['label_index']], summarize=10)
                 self.cells.rnn[dependency][layer].step(cell_data, ctr, inp, dependency_idx, add_idx=add_idx)
 
-            #ctr = tf.Print(ctr, [ctr, tf.shape(self.rows['label_index'])])
-            ctr = tf.add(ctr, 1) if dependencies[1] == 'left' else tf.subtract(ctr, 1)
+            ctr = tf.add(ctr, 1) if forward_array else tf.subtract(ctr, 1)
 
             return ctr, cell_data
         return loop_body
 
     @define_scope
     def calculate_hpred(self):
-        #h_pred = tf.zeros([num_rows, data_length, hidden_size])
-        # TODO: move this to "fetches"?
         self.h_pred = tf.zeros([self.num_rows, self.data_length, self.hidden_size])
         with tf.name_scope('main_loop_body'):
-            for i in range(len(self.dependencies)):
-                left_right = self.dependencies[i][1]
+            for (forward_tree, forward_array, dependencies) in self.dependencies:
+                direction = 'forward' if forward_tree else 'reverse'
 
                 # TODO: don't need to loop over num_layers if we aren't handling children.
                 # Can just grab the states and outputs of the final layers
                 for layer in range(self.num_layers):
 
-                    # forward starts iterating from 1, since 0 is the "empty" dependency
-                    ctr = 1 if left_right == 'left' else self.data_length - 1
+                    # left-to-right starts iterating from 1, since 0 is the "empty" dependency
+                    ctr = 1 if forward_array else self.data_length - 1
 
-                    _, self.cells.data = tf.while_loop(self.generate_loop_cond(left_right),
-                                                self.generate_loop_body(self.dependencies[i], layer),
+                    _, self.cells.data = tf.while_loop(self.generate_loop_cond(forward_array),
+                                                self.generate_loop_body(dependencies, direction, forward_array, layer),
                                                 [ctr, self.cells.data],
                                                 parallel_iterations=1)
 
-                # Technically for left/right siblings, we just need to shift the outputs to align with the tokens.
-                # But that doesn't work in the general case.
-                for dependency in self.dependencies[i][2]:
+                for dependency in dependencies:
                     predicted_output = self.cells.rnn[dependency][self.num_layers-1].stack_output(self.cells.data)
                     #predicted_output = tf.gather(predicted_output, self.rows[dependency if dependency != 'children' else 'left_child'])
                     # predicted_output == [batch_size, data_length, hidden_size]
                     r = tf.range(self.num_rows, dtype=tf.int32)
-                    rows = self.rows[dependency if dependency != 'children' else 'left_child']
+                    rows = self.rows[direction][dependency if dependency != 'children' else 'left_child']
                     # XXX better way of doing this?
                     predicted_output = tf.map_fn(lambda x: tf.gather(predicted_output[x], rows[x]), r, data_type())
 
@@ -481,8 +431,8 @@ class TRNNModel(TRNNBaseModel):
                         predicted_output = tf.matmul(predicted_output, tf.tile(self.params['U'][dependency], [self.num_rows, 1, 1]))
                     self.h_pred += predicted_output
 
-            # the very last left_right gives us which direction the generation must be going
-            return self.h_pred, left_right
+            # the very last traversal gives us the generation direction
+            return self.h_pred, direction, forward_array
 
 
     def __init__(self, *args, **kwargs):

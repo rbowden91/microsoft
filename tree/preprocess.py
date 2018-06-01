@@ -1,16 +1,16 @@
 import os, sys, glob
 import argparse
-import dump_ast
 import random
 import json
 import re
 from queue import Queue
 from threading import Thread, Lock
-from pycparser import parse_file, c_parser, c_generator, c_ast, c_lexer
 from subprocess import Popen, PIPE
 
-from renamer import IDRenamer
-from normalize import RemoveDecls
+from pycparser import parse_file, c_parser, c_generator, c_ast, c_lexer
+
+from normalize import RemoveDecls, RemoveTypedefs, IDRenamer
+from linearize_ast import LinearizeAST
 
 cpp_args = ['-E', '-P', '-D__extension__=', '-D__attribute__(x)=', '-D__nonnull(x)=', '-D__restrict=',
             '-D__THROW=', '-D__volatile__=', '-D__asm__(x)=', '-D__STRING_INLINE=', '-D__inline=']
@@ -79,7 +79,7 @@ def lex_code(code):
     return tokens
 
 # does not handle digraphs/trigraphs
-def preprocess_c(filename, options=None, include_dependencies=False):
+def preprocess_c(filename, options=None, include_dependencies=True):
     #if options['remove_comments']:
     # code, stderr = preprocess_file(filename, path='scc')
     # does the lexer automatically remove comments for us? do we need a separate step for that?
@@ -97,87 +97,80 @@ def preprocess_c(filename, options=None, include_dependencies=False):
     except Exception as e:
         print('uh oh', e, filename)
         return None
-    remove_decls = RemoveDecls()
-    ast = remove_decls.visit(ast)
 
-    id_renamer = IDRenamer(False)
-    renamed_code = id_renamer.visit(ast)
+    ast = RemoveDecls().visit(ast)
+    ast = RemoveTypedefs().visit(ast)
+    ast = IDRenamer().visit(ast)
 
-    # have to make sure we never try to parse something that has had typedefs removed. definitely a better way of doing
-    # this
-    id_renamer.remove_typedefs = True
-    typedef_removed_code = id_renamer.visit(ast)
-    linear_tokens = lex_code(typedef_removed_code)
+    linear_tokens = lex_code(c_generator.CGenerator().visit(ast))
 
-    try:
-        ast = parser.parse(renamed_code)
-    except Exception as e:
-        print(renamed_code)
-        print('uh oh2', e, filename)
-        return None
+    linearizer = LinearizeAST(include_dependencies)
+    linearizer.visit(ast)
 
-    #generator.remove_typedefs = True
-    ast_nodes, node_properties = dump_ast.linearize_ast(ast, id_renamer, include_dependencies=include_dependencies)
-    return ast_nodes, ast, node_properties, linear_tokens
+    return ast, linearizer, linear_tokens
 
-def tokens_to_ids(tokens, token_to_id, string_check, include_token):
+def tokens_to_ids(tokens, token_to_id, include_token):
     output = []
     for i in range(len(tokens)):
         token = tokens[i]
         if token in token_to_id:
             id = token_to_id[token]
-        elif string_check and token.startswith('"'):
+        elif token.startswith('"'):
+            # TODO: do this for all types?
             id = token_to_id['<unk_str>']
         else:
             id = token_to_id['<unk>']
         output.append((id, token) if include_token else id)
     return output
 
-def process_linear(queue, key, lexicon, lock, tokens):
-    # XXX if I want to do padding/batching...
-    #queue['max_linear_tokens'] = max(queue['max_tokens'], len(tokens))
-    with lock:
-        if key == 'train':
-            for token in set(tokens):
-                if token not in lexicon['linear_tokens']:
-                    lexicon['linear_tokens'][token] = 0
-                lexicon['linear_tokens'][token] += 1
-    return { 'label': tokens }
+def process_linear(tokens, key=None, lexicon=None, lock=None):
+    local_lexicon = set()
+    if key == 'train':
+        for token in set(tokens):
+            if token not in local_lexicon:
+                with lock:
+                    if token not in lexicon['linear_tokens']:
+                        lexicon['linear_tokens'][token] = 0
+                    lexicon['linear_tokens'][token] += 1
+                    local_lexicon.add(token)
+    return { 'forward_label': tokens }
 
-def process_ast(queue, key, lexicon, lock, data):
-    label_lexicon = set()
-    attr_lexicon = set()
+def process_ast(linearizer, key=None, lexicon=None, lock=None):
+    local_lexicon = {
+        'label': set(),
+        'attr': set()
+    }
+    # skip the nil slot
+    linearizer.nodes['reverse'].pop(0)
+    nodes = linearizer.nodes['forward']
+    nodes.pop(0)
+    for i in range(len(nodes)):
+        data = nodes[i]
+        data['attr'] = data['attr'] if data['attr'] is not None else '<no_attr>'
+        data['label'] = data['label'] if data['label'] is not None else '<nil>'
+        data['parent_attr'] = data['parent_attr'] if data['parent_attr'] is not None else '<no_attr>'
+        data['parent_label'] = data['parent_label'] if data['parent_label'] is not None else '<nil>'
+
+        if lexicon is not None:
+            for j in ['label', 'attr']:
+                if key == "train" and data[j] not in local_lexicon[j]:
+                    with lock:
+                        if data[j] not in local_lexicon[j]:
+                            lexicon['ast_' + j + 's'][data[j]] = 0
+                        lexicon['ast_' + j + 's'][data[j]] += 1
+                    local_lexicon[j].add(data[j])
+
     new_rows = {}
-    for i in range(len(data)):
-        label = data[i]['label']
-        if key == "train" and label not in label_lexicon:
-            with lock:
-                if label not in lexicon['ast_labels']:
-                    lexicon['ast_labels'][label] = 0
-                lexicon['ast_labels'][label] += 1
-            label_lexicon.add(label)
-
-        # transform attrs to a attr index.
-        # XXX strongly assumes everything has at most one attr!
-        for (name, val) in data[i]['attrs']:
-            if name in ['value', 'op', 'name']:
-                data[i]['attr'] = val
-                break
-        else:
-            #print('woo')
-            data[i]['attr'] = '<no_attr>'
-        if key == 'train' and data[i]['attr'] not in label_lexicon:
-            with lock:
-                if data[i]['attr'] not in lexicon['ast_attrs']:
-                    lexicon['ast_attrs'][data[i]['attr']] = 0
-                lexicon['ast_attrs'][data[i]['attr']] += 1
-            attr_lexicon.add(data[i]['attr'])
-        del(data[i]['attrs'])
-    for k in data[0]:
-        new_rows[k] = [int(d[k]) if isinstance(d[k], bool) else d[k] for d in data]
+    for k in ['reverse', 'forward']:
+        nodes = linearizer.nodes[k]
+        for i in nodes[0]:
+            if i in ['forward', 'reverse']:
+                if i != k: continue
+                for j in nodes[0][i]:
+                    new_rows[k + '_' + j] = [int(n[i][j]) if isinstance(n[i][j], bool) else n[i][j] for n in nodes]
+            else:
+                new_rows[k + '_' + i] = [int(n[i]) if isinstance(n[i], bool) else n[i] for n in nodes]
     return new_rows
-
-
 
 def process_queue(queues, lexicon, lock, args):
     keys = list(queues.keys())
@@ -188,20 +181,51 @@ def process_queue(queues, lexicon, lock, args):
         while not queues[key]['queue'].empty():
             filename = queues[key]['queue'].get()
             #print(filename)
-            ret = preprocess_c(filename, args)
+            ret = preprocess_c(filename, args, include_dependencies=False)
             if ret is None:
                 print('uh oh!** ', filename)
                 queues[key]['queue'].task_done()
                 continue
-            ast_nodes, _, _, linear_tokens = ret
+            _, linearizer, linear_tokens = ret
             rows = {}
-            rows['linear'] = process_linear(queues[key], key, lexicon, lock, linear_tokens)
-            rows['ast'] = process_ast(queues[key], key, lexicon, lock, ast_nodes)
+            rows['linear'] = process_linear(linear_tokens, key, lexicon, lock)
+            rows['ast'] = process_ast(linearizer, key, lexicon, lock)
             with lock:
                 for j in rows:
                     queues[key][j].append(rows[j])
             queues[key]['queue'].task_done()
 
+
+def finish_row(row, lexicon, features=None):
+    # all rows should have a forward label
+    row_len = len(row['forward_label'])
+
+    for i in ['forward_', 'reverse_']:
+        for j in ['parent_', '']:
+            for k in ['label', 'attr']:
+                idx = i + j + k
+                if idx in row:
+                    row[idx + '_index'] = tokens_to_ids(row[idx], lexicon[k], False)
+                    del(row[idx])
+                else:
+                    row[idx + '_index'] = [0] * row_len
+
+    # this must be a linear model
+    if features is not None:
+        row['forward_left_sibling'] = list(range(row_len))
+        row['forward_right_sibling'] = list(range(2, row_len+1)) + [0]
+        for key in features:
+            if key not in row:
+                row[key] = [0] * row_len
+
+    # the nil slot is the only slot that's masked out, other than potential padded batches
+    row['forward_mask'] = [1] * row_len
+    row['reverse_mask'] = [1] * row_len
+
+    # insert the nil slot
+    for k in row:
+        row[k] = [0] + row[k]
+    return row
 
 
 if __name__ == "__main__":
@@ -263,43 +287,31 @@ if __name__ == "__main__":
     linear_tokens = set([token for token in lexicon['linear_tokens'] if lexicon['linear_tokens'][token] > cutoff])
 
     lexicon = {'ast': {}, 'linear': {}}
-    lexicon['ast']['label_ids'] = dict(zip(ast_labels, range(1, len(ast_labels) + 1)))
-    lexicon['ast']['label_ids']['<nil>'] = 0
-    lexicon['ast']['label_ids']['<unk>'] = len(lexicon['ast']['label_ids'])
-    lexicon['ast']['attr_ids'] = dict(zip(ast_attrs, range(1, len(ast_attrs) + 1)))
-    lexicon['ast']['attr_ids']['<nil>'] = 0
-    lexicon['ast']['attr_ids']['<unk>'] = len(lexicon['ast']['attr_ids'])
-    lexicon['ast']['attr_ids']['<unk_str>'] = len(lexicon['ast']['attr_ids'])
-    lexicon['linear']['label_ids'] = dict(zip(linear_tokens, range(1, len(linear_tokens) + 1)))
-    lexicon['linear']['label_ids']['<nil>'] = 0
-    lexicon['linear']['label_ids']['<unk>'] = len(lexicon['linear']['label_ids'])
-    lexicon['linear']['label_ids']['<unk_str>'] = len(lexicon['linear']['label_ids'])
-    lexicon['linear']['attr_ids'] = {'<nil>': 0}
+    lexicon['ast']['label'] = dict(zip(ast_labels, range(1, len(ast_labels) + 1)))
+    lexicon['ast']['label']['<nil>'] = 0
+    lexicon['ast']['label']['<unk>'] = len(lexicon['ast']['label'])
+    lexicon['ast']['attr'] = dict(zip(ast_attrs, range(1, len(ast_attrs) + 1)))
+    lexicon['ast']['attr']['<nil>'] = 0
+    lexicon['ast']['attr']['<unk>'] = len(lexicon['ast']['attr'])
+    lexicon['ast']['attr']['<unk_str>'] = len(lexicon['ast']['attr'])
+    lexicon['linear']['label'] = dict(zip(linear_tokens, range(1, len(linear_tokens) + 1)))
+    lexicon['linear']['label']['<nil>'] = 0
+    lexicon['linear']['label']['<unk>'] = len(lexicon['linear']['label'])
+    lexicon['linear']['label']['<unk_str>'] = len(lexicon['linear']['label'])
+    lexicon['linear']['attr'] = {'<nil>': 0}
 
     os.makedirs(args.store_path, exist_ok=True)
     for model in ['ast', 'linear']:
         for k in queues:
             writer = tf.python_io.TFRecordWriter(os.path.join(args.store_path, model + '_' + k + '.tfrecord'))
             for i in range(len(queues[k][model])):
-                row = queues[k][model][i]
-                if model == 'linear':
-                    row['attr'] = ['<nil>'] * len(row['label'])
-                    row['left_sibling'] = list(range(len(row['label'])))
-                    row['right_sibling'] = list(range(2, len(row['label'])+1)) + [0]
-                    for key in queues[k]['ast'][i]:
-                        if key not in row:
-                            row[key] = [0] * len(row['label'])
-
-                row['mask'] = [1] * len(row['label'])
-                row['attr_index'] = tokens_to_ids(row['attr'], lexicon[model]['attr_ids'], True, False)
-                row['label_index'] = tokens_to_ids(row['label'], lexicon[model]['label_ids'], model == 'linear', False)
-                del(row['attr'])
-                del(row['label'])
+                row = finish_row(queues[k][model][i], lexicon[model],
+                                 queues['train']['ast'][0].keys() if model == 'linear' else None)
 
                 features = {}
-                for key in row:
-                    # prepend a 0 for the nil slot
-                    features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=[0] + row[key]))
+                for j in row:
+                    # add in 0 for the nil slot
+                    features[j] = tf.train.Feature(int64_list=tf.train.Int64List(value=row[j]))
                 example = tf.train.Example(features=tf.train.Features(feature=features))
                 writer.write(example.SerializeToString())
             writer.close()
@@ -309,18 +321,3 @@ if __name__ == "__main__":
     config['features'] = list(queues['train']['ast'][0].keys())
     with open(os.path.join(args.store_path, 'config.json'), 'w') as f:
         json.dump(config, f)
-
-
-
-
-"""
-parser.add_argument('-p', '--preprocessor', help='run the c preprocessor on the code', action='store_true')
-parser.add_argument('-i', '--sequence_ids', help='rename ids to ID0, ID1, etc.', action='store_true')
-parser.add_argument('-I', '--rename_ids', help='rename all ids to ID (overrides -i)', action='store_true')
-parser.add_argument('-S', '--truncate_strings', help='truncate all strings to ""', action='store_true')
-parser.add_argument('-u', '--rename_user_functions', help='renames user-defined functions', action='store_true')
-parser.add_argument('-f', '--rename_functions', help='renames user and library functions (assumes -f)', action='store_true')
-parser.add_argument('-s', '--sequence_renamed_functions', help='renames user and library functions (assumes -f)', action='store_true')
-
-parser.add_argument('-c', '--remove_comments', help='remove comments', action='store_true')
-"""

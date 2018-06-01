@@ -120,9 +120,9 @@ class Trainer(object):
         start_time = time.time()
 
         feed_dict = {}
-        for c in self.models:
-            for d in self.models[c]:
-                feed_dict[self.models[c][d].placeholders['is_inference']] = False
+        #for c in self.models:
+        #    for d in self.models[c]:
+        #        feed_dict[self.models[c][d].placeholders['is_inference']] = False
 
         c = 'joint_configs' if is_joint else 'dependency_configs'
         models = self.models[c]
@@ -344,8 +344,8 @@ def main(_):
 
         config.update(get_config())
         config.update(vars(args))
-        config['label_size'] = len(token_ids['label_ids'])
-        config['attr_size'] = len(token_ids['attr_ids'])
+        config['label_size'] = len(token_ids['label'])
+        config['attr_size'] = len(token_ids['attr'])
         # TODO: the final train perplexity should go over the epoch again, without backprop
         config['train_perplexities'] = []
         config['valid_perplexities'] = []

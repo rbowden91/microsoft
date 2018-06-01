@@ -15,8 +15,7 @@ import tensorflow as tf
 import queue as Q
 
 #import check_correct
-import dump_ast
-from model import joint_configs
+from config import joint_configs, dependency_configs
 from pycparser import c_parser, c_ast, parse_file
 
 flags = tf.flags
@@ -36,8 +35,6 @@ max_changes = 3
 
 # side effect: populate node_properties with parent pointers (not yet used?)
 def fill_queue(node, node_properties, q, parent=None):
-    if node.__class__.__name__ in dump_ast.ignore:
-        return
     node_properties[node]['parent'] = parent
 
     score = node_properties[node]['attr_ratio']
@@ -54,9 +51,6 @@ def search_changes(ast, node_properties, list_q, max_changes, filename, directiv
         # adjust this cutoff?
         if node_properties[node]['attr_ratio'] == 1.0:
             break
-        # XXX for now, don't deal with IDs...what about functions though? ugh...
-        if node.__class__.__name__ in dump_ast.ignore or node.__class__.__name__ == 'ID':
-            continue
         nvlist = [(n, getattr(node, n)) for n in node.attr_names]
         for (name, val) in nvlist:
             if name in ['value', 'op', 'name']:
@@ -259,41 +253,22 @@ def step(session, config, tokens, raw_data, node_properties=None):
 
 
 
-def run_epoch(session, config, tokens, raw_data, node_properties=None):
+def run_epoch(session, config, data, raw_data):
+
+    if config['model'] == 'linear':
+        # XXX XXX pass in the include_token here
+        tokens = preprocess.finish_row(data, raw_data, config['features'].keys())
+    else:
+        node_properties = data.node_properties
+        tokens = data.nodes['forward']
+        rows = preprocess.process_ast(data)
+        rows = preprocess.finish_row(rows, raw_data)
 
     data_dict = {}
-    if config['model'] == 'linear':
-        for k in config['features']:
-            p = config['features'][k]
-            if k == 'left_sibling':
-                data_dict[p] = [[0] + list(range(len(tokens) - 1))]
-            elif k == 'right_sibling':
-                data_dict[p] = [[0] + list(range(2, len(tokens))) + [0]]
-            elif k == 'label_index':
-                data_dict[p] = [[0] + [token[0] for token in tokens]]
-            elif k == 'mask':
-                data_dict[p] = [[0] + [1] * (len(tokens)-1)]
-            else:
-                data_dict[p] = [[0] * len(tokens)]
-    else:
-        for k in config['features']:
-            p = config['features'][k]
-            data_dict[p] = [[0]]
-        for token in tokens:
-            for (name, val) in token['attrs']:
-                if name in ['value', 'op', 'name']:
-                    # TODO just look up directly, and do the string check, too
-                    token['attr'] = val
-                    break
-            else:
-                token['attr'] = '<no_attr>'
-            token['attr_index'] = preprocess.tokens_to_ids([token['attr']], raw_data['attr_to_id'], True, False)[0]
-            token['label_index'] = raw_data['label_to_id'][token['label']]
-            token['mask'] = 1
-            for k in config['features']:
-                p = config['features'][k]
-                data_dict[p][0].append(token[k])
-
+    for k in rows:
+        # skip over dependencies
+        if k in config['features']:
+            data_dict[config['features'][k]] = [rows[k]]
 
     session.run(config['tensor_iter'], data_dict)
 
@@ -301,7 +276,7 @@ def run_epoch(session, config, tokens, raw_data, node_properties=None):
     for k in config['feed_dict']:
         config['feed_dict'][k] = True
 
-    props = node_properties if node_properties is not None else []
+    props = tokens if tokens is not None else []
     for i in range(len(tokens)):
         token = tokens[i][1] if config['model'] == 'linear' else tokens[i]['label']
         prop = {'label': token, 'cells': {}}
@@ -311,14 +286,17 @@ def run_epoch(session, config, tokens, raw_data, node_properties=None):
             for dependency in vals[dconfig]:
                 prop['cells'][dconfig][dependency] = {}
                 for k in vals[dconfig][dependency]['cells']:
+                    direction = 'forward' if dconfig == 'joint_configs' or \
+                                dependency_configs[config['model']][dependency][-1][0] else 'reverse'
+                    idx = tokens[i][direction]['self']
                     prop['cells'][dconfig][dependency][k] = {
-                        'output': [vals[dconfig][dependency]['cells'][k]['output'][0][i+1]],
+                        'output': [vals[dconfig][dependency]['cells'][k]['output'][0][idx]],
                         'states': []
                     }
                     for layer in range(config['num_layers']):
                         prop['cells'][dconfig][dependency][k]['states'].append({
-                            'c': [vals[dconfig][dependency]['cells'][k]['states'][layer]['c'][0][i+1]],
-                            'h': [vals[dconfig][dependency]['cells'][k]['states'][layer]['h'][0][i+1]]
+                            'c': [vals[dconfig][dependency]['cells'][k]['states'][layer]['c'][0][idx]],
+                            'h': [vals[dconfig][dependency]['cells'][k]['states'][layer]['h'][0][idx]]
                         })
 
                 prop[dconfig][dependency] = {}
@@ -330,35 +308,33 @@ def run_epoch(session, config, tokens, raw_data, node_properties=None):
                     prop[dconfig][dependency][k] = p = {}
 
                     probs = vals[dconfig][dependency]['probabilities'][k][0]
-                    target = data_dict[config['features'][k]][0]
+                    target = data_dict[config['features'][direction + '_' + k]][0]
                     if dconfig == 'joint_configs':
-                        p['alpha'] = alpha = probs[i+1].tolist()
+                        p['alpha'] = alpha = probs[idx].tolist()
                         sum_probs = 0
                         for jd in range(len(joint_configs[config['model']][dependency])):
                             joint_dependency = joint_configs[config['model']][dependency][jd]
-                            probs = vals['dependency_configs'][joint_dependency][k]['probabilities'][0][i+1]
+                            probs = vals['dependency_configs'][joint_dependency][k]['probabilities'][0][idx]
                             sum_probs += alpha[jd] * probs
                         probs = sum_probs
-                        #p['actual'] = target[i+1]
-                        #p['expected'] = float(probs)
                     if k in ['label_index', 'attr_index']:
                         if dconfig != 'joint_configs':
-                            probs = probs[i+1]
+                            probs = probs[idx]
                         rank = np.flip(np.argsort(probs), 0)
                         p['expected'] = raw_data[k + '_to_token'][rank[0]]
-                        p['actual'] = raw_data[k + '_to_token'][target[i+1]]
+                        p['actual'] = raw_data[k + '_to_token'][target[idx]]
                         p['expected_probability'] = float(probs[rank[0]])
-                        p['actual_probability'] = float(probs[target[i+1]])
-                        p['ratio'] = float(probs[target[i+1]] / (probs[rank[0]]))
+                        p['actual_probability'] = float(probs[target[idx]])
+                        p['ratio'] = float(probs[target[idx]] / (probs[rank[0]]))
                         p['probabilities'] = [(float(probs[j]), raw_data[k+'_to_token'][j]) for j in rank]
                     else:
-                        p['actual'] = target[i+1]
-                        p['expected'] = float(probs[i+1])
+                        p['actual'] = target[idx]
+                        p['expected'] = float(probs[idx])
 
         if node_properties is None:
             props.append(prop)
         else:
-            props[tokens[i]['self']].update(prop)
+            props[i].update(prop)
 
     return props
 
@@ -378,7 +354,7 @@ def main(_):
         fetches[d] = {}
         initials[d] = {}
         for i in config['models'][d]:
-            feed[config['models'][d][i]['placeholders']['is_inference']] = False
+            #feed[config['models'][d][i]['placeholders']['is_inference']] = False
             fetches[d][i] = config['models'][d][i]['fetches']
             initials[d][i] = {}
             for j in config['models'][d][i]['initials']:
@@ -398,16 +374,16 @@ def main(_):
     raw_data = dict()
     with open(os.path.join(config['data_path'], config['model'] + '_lexicon.json')) as f:
         token_ids = json.load(f)
-    raw_data['label_to_id'] = token_ids['label_ids']
-    raw_data['attr_to_id'] = token_ids['attr_ids']
+    raw_data['label'] = token_ids['label']
+    raw_data['attr'] = token_ids['attr']
 
     raw_data['label_index_to_token'] = dict()
-    for k in raw_data['label_to_id']:
-        raw_data['label_index_to_token'][raw_data['label_to_id'][k]] = k
+    for k in raw_data['label']:
+        raw_data['label_index_to_token'][raw_data['label'][k]] = k
 
     raw_data['attr_index_to_token'] = dict()
-    for k in raw_data['attr_to_id']:
-        raw_data['attr_index_to_token'][raw_data['attr_to_id'][k]] = k
+    for k in raw_data['attr']:
+        raw_data['attr_index_to_token'][raw_data['attr'][k]] = k
 
     with tf.Graph().as_default() as graph:
         saver = tf.train.import_meta_graph(os.path.join(best_dir, "model.meta"))
@@ -429,9 +405,8 @@ def main(_):
                             text = f.read()
                         directives, _ = preprocess.grab_directives(text)
                         # XXX this can return None
-                        ast_nodes, ast, node_properties, tokens = preprocess.preprocess_c(filepath,
-                                include_dependencies=True)
-                    except Exception(e):
+                        ast, linearizer, tokens = preprocess.preprocess_c(filepath)
+                    except Exception as e:
                         print(e)
                         try:
                             os.unlink(filepath)
@@ -444,17 +419,16 @@ def main(_):
                         # Can't add attributes directly to Nodes because the class uses __slots__, so use this dictionary to
                         # extend objects
                         #run_ast_epoch(session, graph, config, ast, ast_nodes, node_properties, raw_data)
-                        run_epoch(session, config, ast_nodes, raw_data, node_properties)
-                        step(session, config, ast_nodes, raw_data, node_properties)
+                        run_epoch(session, config, linearizer, raw_data)
+                        #step(session, config, linearizer, raw_data)
                         code = "blah"#search(ast, node_properties, filename, directives)
                         output = {
-                            'ast': print_ast(ast, node_properties),
+                            'ast': print_ast(ast, linearizer.node_properties),
                             #'code': generator.visit(ast),
                             'fixed_code': code
                         }
                     else:
-                        tokens = preprocess.tokens_to_ids(tokens, raw_data['label_to_id'], True, True)
-                        props = run_epoch(session, graph, config, tokens, raw_data)
+                        props = run_epoch(session, config, tokens, raw_data)
                         code = "blah"#search(ast, node_properties, filename, directives)
                         output = {
                             'linear': props,

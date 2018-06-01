@@ -57,6 +57,7 @@ function recursive_print(d, indent) {
             for (var i = 0; i < 10; i++) {
                 prob_str += htmlEncode(probs[i][1]) + ' ' + htmlEncode(probs[i][0]) + '<br>';
             }
+            prob_str += '<br>';
         } else if (typeof(d[k]) === 'object') {
             if (k == 'children') continue;
             expectation += print_indent(indent) + k + ': {<br>';
@@ -82,7 +83,8 @@ function draw(data, model, node) {
     for (var i = 0; i < configs.length; i++) {
         for (var config in data[configs[i]]) {
             var found_config = [configs[i], config];
-            output += '<input type="radio" data-config-type="' + configs[i] + '" + data-config-name="' + config +'" name="dir"> ' + configs[i] + ' ' + config + '<br>';
+            var name = configs[i] + ' ' + config;
+            output += '<input type="radio" data-config-type="' + configs[i] + '" + data-config-name="' + config +'" name="dir" id="' + name + '"><label for="' + name +'"> ' + name + '</label><br>';
         }
     }
     // XXX fix this mess
