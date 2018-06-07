@@ -376,22 +376,29 @@ class TRNNModel(TRNNBaseModel):
                     else self.cells.rnn[dependency][layer-1].get_output(cell_data, idx)
 
             for dependency in dependencies:
-                inp = get_input(ctr)
+                if dependency == 'right_hole' and layer == 0:
+                    inp = self.cells.rnn['children'][self.num_layers-1].get_output(cell_data, ctr)
+                else:
+                    inp = get_input(ctr)
 
                 if dependency != 'children':
-                    dependency_idx = gather_dependency(dependency)
+                    if dependency == 'right_hole':
+                        dependency_idx = self.rows['reverse'][dependency][:, ctr]
+                    else:
+                        dependency_idx = gather_dependency(dependency)
                     add_idx = None
                 else:
-                    dependency_idx = gather_dependency('left_child')
+                    dependency_idx = gather_dependency('right_child')
 
                     parent_idx = gather_dependency('parent')
                     parent_inp = get_input(parent_idx, parent=True)
                     inp = tf.stack([inp, parent_inp])
 
-                    right_sibling = gather_dependency('right_sibling')
+                    right_sibling = gather_dependency('left_sibling')
                     add_idx = right_sibling if layer == self.num_layers - 1 else None
 
-                #ctr = tf.Print(ctr, [ctr, dependency_idx, self.rows[direction]['label_index']], summarize=10)
+                #if dependency != 'children':
+                #    ctr = tf.Print(ctr, [ctr, dependency_idx, self.rows[direction][dependency]], summarize=10)
                 self.cells.rnn[dependency][layer].step(cell_data, ctr, inp, dependency_idx, add_idx=add_idx)
 
             ctr = tf.add(ctr, 1) if forward_array else tf.subtract(ctr, 1)
@@ -403,7 +410,10 @@ class TRNNModel(TRNNBaseModel):
     def calculate_hpred(self):
         self.h_pred = tf.zeros([self.num_rows, self.data_length, self.hidden_size])
         with tf.name_scope('main_loop_body'):
+            all_dependencies = set()
+            end_ctr = None
             for (forward_tree, forward_array, dependencies) in self.dependencies:
+                all_dependencies.update(dependencies)
                 direction = 'forward' if forward_tree else 'reverse'
 
                 # TODO: don't need to loop over num_layers if we aren't handling children.
@@ -413,23 +423,25 @@ class TRNNModel(TRNNBaseModel):
                     # left-to-right starts iterating from 1, since 0 is the "empty" dependency
                     ctr = 1 if forward_array else self.data_length - 1
 
-                    _, self.cells.data = tf.while_loop(self.generate_loop_cond(forward_array),
+                    end_ctr, self.cells.data = tf.while_loop(self.generate_loop_cond(forward_array),
                                                 self.generate_loop_body(dependencies, direction, forward_array, layer),
                                                 [ctr, self.cells.data],
                                                 parallel_iterations=1)
 
-                for dependency in dependencies:
-                    predicted_output = self.cells.rnn[dependency][self.num_layers-1].stack_output(self.cells.data)
-                    #predicted_output = tf.gather(predicted_output, self.rows[dependency if dependency != 'children' else 'left_child'])
-                    # predicted_output == [batch_size, data_length, hidden_size]
-                    r = tf.range(self.num_rows, dtype=tf.int32)
-                    rows = self.rows[direction][dependency if dependency != 'children' else 'left_child']
-                    # XXX better way of doing this?
-                    predicted_output = tf.map_fn(lambda x: tf.gather(predicted_output[x], rows[x]), r, data_type())
+            # the last dependency group must be the direction we care about
+            (_, _, dependencies) = self.dependencies[-1]
+            for dependency in dependencies:
+                predicted_output = self.cells.rnn[dependency][self.num_layers-1].stack_output(self.cells.data)
+                #predicted_output = tf.gather(predicted_output, self.rows[dependency if dependency != 'children' else 'left_child'])
+                # predicted_output == [batch_size, data_length, hidden_size]
+                r = tf.range(self.num_rows, dtype=tf.int32)
+                rows = self.rows[direction][dependency if dependency != 'children' else 'right_hole']
+                # XXX better way of doing this?
+                predicted_output = tf.map_fn(lambda x: tf.gather(predicted_output[x], rows[x]), r, data_type())
 
-                    if 'U' in self.params:
-                        predicted_output = tf.matmul(predicted_output, tf.tile(self.params['U'][dependency], [self.num_rows, 1, 1]))
-                    self.h_pred += predicted_output
+                if 'U' in self.params:
+                    predicted_output = tf.matmul(predicted_output, tf.tile(self.params['U'][dependency], [self.num_rows, 1, 1]))
+                self.h_pred += predicted_output
 
             # the very last traversal gives us the generation direction
             return self.h_pred, direction, forward_array

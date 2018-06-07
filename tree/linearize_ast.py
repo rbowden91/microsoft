@@ -41,6 +41,7 @@ class LinearizeAST(c_ast.NodeVisitor):
         # dependencies
         self.parent = 0
         self.left_sibling = 0
+        self.hole = 0
 
     def generic_visit_reverse(self, node):
         props = self.node_properties[node]
@@ -50,6 +51,7 @@ class LinearizeAST(c_ast.NodeVisitor):
             'parent': self.nodes['forward'][props['forward']['parent']]['reverse']['self'],
             'right_sibling': self.nodes['forward'][props['forward']['right_sibling']]['reverse']['self'],
             'right_prior': my_node_num - 1,
+            'right_hole': self.hole
         })
         props['last_sibling'] = props['forward']['right_sibling'] == 0
 
@@ -64,6 +66,10 @@ class LinearizeAST(c_ast.NodeVisitor):
         children = node.children()
         for i in range(len(children)-1, -1, -1):
             self.generic_visit_reverse(children[i][1])
+            self.hole = self.node_properties[children[i][1]]['reverse']['self']
+
+        props['forward']['right_hole'] = self.nodes['reverse'][props['reverse']['right_hole']]['forward']['self']
+        props['reverse']['left_hole'] = self.nodes['forward'][props['forward']['left_hole']]['reverse']['self']
 
     def generic_visit_forward(self, node):
         # strongly assumes there is at most one attribute we care about
@@ -97,7 +103,8 @@ class LinearizeAST(c_ast.NodeVisitor):
             'self': my_node_num,
             'parent': self.parent,
             'left_sibling': self.left_sibling,
-            'left_prior': my_node_num - 1,
+            'left_hole': self.hole,
+            'left_prior': my_node_num - 1
         })
         if self.include_dependencies:
             props['dependencies']['self'] = node
@@ -115,6 +122,7 @@ class LinearizeAST(c_ast.NodeVisitor):
             self.parent = props['forward']['self']
             self.left_sibling = self.node_properties[children[i-1][1]]['forward']['self'] if i != 0 else 0
             self.generic_visit_forward(children[i][1])
+            self.hole = self.node_properties[children[i][1]]['forward']['self']
 
         if self.include_dependencies:
             for i in props['forward']:
@@ -123,6 +131,7 @@ class LinearizeAST(c_ast.NodeVisitor):
 
     def generic_visit(self, node):
         self.generic_visit_forward(node)
+        self.hole = 0
         self.generic_visit_reverse(node)
         # delete the nil slot
         self.nodes['forward'][0] = None

@@ -124,7 +124,7 @@ class RNNTensorArrayCell():
             size = self.array.hidden_size
             def lstm_cell(is_tree):
                 if is_tree:
-                    return TreeLSTMCell(size, data_type=self.data_type, forget_bias=0.0)
+                    return TreeLSTMCell(size, data_type=self.data_type)
                 else:
                     return tf.contrib.rnn.BasicLSTMCell(
                         self.array.hidden_size, forget_bias=0.0, state_is_tuple=True)

@@ -7,6 +7,9 @@ valid_dependencies = {
     'right_prior': 'right',
     'right_child': 'right',
     'right_sibling': 'right',
+
+    # FIXME
+    'right_hole': 'left'
 }
 
 # 'top/bottom' and 'left/right' end up replaced by 'True/False'
@@ -19,6 +22,8 @@ dependency_configs = {
         'd1': [('bottom', 'right', ['children', 'right_sibling'])],
         'd2': [('top', 'left', ['parent', 'left_sibling'])],
         'd3': [('top', 'right', ['parent', 'right_sibling'])],
+        # TODO: validate that it makes sense to traverse in this order?
+        'd4': [('bottom', 'left', ['children']), ('top', 'left', ['parent', 'left_sibling', 'right_hole'])],
         #'d3': [('bottom_right', [
         #{ 'bottom_right': [['children'], ['right_children'],
         #                   ['children', 'initial_right_children']]},
