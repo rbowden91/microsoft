@@ -4,12 +4,12 @@ def GetString(interpreter):
     def helper(args):
         stdin = interpreter.stdin.split('\n')
         interpreter.stdin = stdin[1:]
-        stdin = bytearray(stdin[0], 'latin-1')
+        stdin = bytearray(stdin[0], 'latin-1') + bytearray([0])
         nonlocal counter
         name = 'GetString ' + str(counter)
         counter += 1
-        interpreter.memory[name] = (['char'], len(stdin), stdin, 'heap')
-        return ['string'], name
+        interpreter.memory_init(name, ['char'], len(stdin), stdin, 'heap')
+        return ['string'], (name, 0)
 
     # TODO: technically const?
     type_ = [('(builtin)', ['string'], [], [])]
@@ -38,16 +38,24 @@ def isupper(interpreter):
 
 def printf(interpreter):
     def helper(args):
-        #TODO: is this more complicated than it seems?
+        new_args = []
+        for arg in args:
+            if isinstance(arg, tuple):
+                # we're dealing with a pointer + offset
+                arr, offset = arg
+                array = interpreter.memory[arr]
+                assert offset < array['len']
+                array = array['array'][offset:]
+                new_args.append(array.decode('latin-1'))
+            else:
+                new_args.append(arg)
+        args = new_args
+
         if len(args) == 1:
             interpreter.stdout += args[0]
         else:
             fmt = args[0]
             args = args[1:]
-            for i in range(len(args)):
-                # TODO: we don't want to do this if the flag is %p and not %s
-                if args[i] in interpreter.memory:
-                    args[i] = interpreter.memory[args[i]][2].decode('latin-1')
             interpreter.stdout += args[0] % args[1:]
         return ['int'], 1
 
@@ -58,7 +66,10 @@ def printf(interpreter):
 def strlen(interpreter):
     def helper(args):
         # TODO: could iterate over memory til we hit \0
-        return ['size_t'], interpreter.memory[args[0]][1]
+        arr, offset = args[0]
+        # -1 to remove the \0
+        assert offset < interpreter.memory[arr]['len'] - 1
+        return ['size_t'], interpreter.memory[arr]['len'] - offset - 1
 
     # TODO: technically const?
     type_ = [('(builtin)', ['size_t'], [None], [['*', 'char']])]

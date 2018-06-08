@@ -121,6 +121,12 @@ def implicit_cast(type1, val1, type2, val2):
         return type2, float(val1), val2
     elif is_float_type(type1) and is_int_type(type2):
         return type1, val1, float(val2)
+    elif is_int_type(type1) and is_pointer_type(type2):
+        assert val1 == 0
+        return type2, ('NULL', 0), val2
+    elif is_int_type(type2) and is_pointer_type(type1):
+        assert val2 == 0
+        return type1, val1, ('NULL', 0)
     return type1, val1, val2
 
 def is_func_type(type_):
@@ -170,6 +176,8 @@ class Interpreter(c_ast.NodeVisitor):
             self.type_map[0][name] = type_
             self.memory_init(name, type_, 1, [func], 'text')
 
+        self.memory_init('NULL', 'void', 0, [], 'NULL')
+
     @contextmanager
     def scope(self):
         self.id_map.append({})
@@ -197,7 +205,7 @@ class Interpreter(c_ast.NodeVisitor):
             'type': type_,
             'name': name,
             'len': len_,
-            'array': value,
+            'array': array,
             'segment': segment
         }
 
@@ -218,16 +226,14 @@ class Interpreter(c_ast.NodeVisitor):
 
         # TODO: environment variables as well?
         self.memory_init('argv', ['*', 'char'], len(argv) + 1,
-                                    [('argv[' + str(i) + ']', i) for i in range(len(argv) + 1)], 'argv')
+            [('argv[' + str(i) + ']', 0) for i in range(len(argv))] + [('NULL', 0)], 'argv')
 
         for i in range(len(argv)):
-            self.memory_init('argv[' + str(i) + ']', ['char'], len(argv[i]) + 1,
-                                                bytearray(argv[i], 'latin-1').append(0), 'argv')
+            array = bytearray(argv[i], 'latin-1') + bytearray([0])
+            self.memory_init('argv[' + str(i) + ']', ['char'], len(array), array, 'argv')
             #for j in range(len(argv[i])):
             #    self.memory['argv[' + str(i) + '][' + str(j) + ']'] = ('char', 1, [argv[i][j]])
 
-        # TODO: how to figure out how NULL has been #defined?
-        self.memory_init('argv[' + str(len(argv)) + ']', ['char'], 0, [], 'NULL')
 
         self.stdin = stdin
 
@@ -249,6 +255,9 @@ class Interpreter(c_ast.NodeVisitor):
         # swap the two, in case the student happened to do something like 2[argv], which is technically valid
         if is_pointer_type(idx_type):
             idx_type, idx, arr_type, arr = arr_type, arr, idx_type, idx
+        arr, offset = arr
+        idx += offset
+
         assert idx < self.memory[arr]['len'], 'Out of bounds array:{} idx:{} length:{}'.format(arr, idx,
                 self.memory[arr]['len'])
 
@@ -294,7 +303,33 @@ class Interpreter(c_ast.NodeVisitor):
             return ['int'], 1
 
         rtype, rval = self.visit(n.right)
-        type_, lval, rval = implicit_cast(ltype, lval, rtype, rval)
+
+        # TODO: only currently supported pointer math is between a pointer for addition and subtraction, and two pointers for subtraction. Could use like, xor support or something?
+
+        add_back = None
+        if is_pointer_type(ltype) or is_pointer_type(rtype):
+            if n.op == '==' or n.op == '!=':
+                # specifically for NULL handling
+                if not is_pointer_type(ltype) or not is_pointer_type(rtype):
+                    type_, lval, rval = implicit_cast(ltype, lval, rtype, rval)
+                    rtype = ltype = type_
+
+            if is_pointer_type(ltype) and is_pointer_type(rtype):
+                assert n.op in ['-', '!=', '<', '>', '<=', '>=', '==']
+                if n.op == '-':
+                    (larr, lval), (rarr, rval), type_ = lval, rval, ltype
+                    assert larr == rarr
+                else: assert ltype == rtype
+            else:
+                assert n.op in ['+', '-']
+                if is_pointer_type(ltype):
+                    (add_back, lval), type_ = lval, ltype
+                else:
+                    (add_back, rval), type_ = rval, rtype
+
+        else:
+            type_, lval, rval = implicit_cast(ltype, lval, rtype, rval)
+
         if n.op == '%':
             assert is_int_type(type_), type_
             assert rval != 0
@@ -303,7 +338,10 @@ class Interpreter(c_ast.NodeVisitor):
 
         type_, op = binops[n.op](type_)
         # TODO cast to c type nonsense
-        return type_, op(lval, rval)
+        val = op(lval, rval)
+        if add_back is not None:
+            val = (add_back, val)
+        return type_, val
 
 
     def visit_Break(self, n):
@@ -328,11 +366,12 @@ class Interpreter(c_ast.NodeVisitor):
             else:
                 const_num = len(self.string_constants)
                 # should be unique in memory, since it has a space in the name
-                name = 'strconst ' + const_num
+                name = 'strconst ' + str(const_num)
                 self.string_constants[n.value] = name
                 # append 0 for the \0 character
-                memory_init(name, type_, len(n.value), bytes(n.value).append(0), 'rodata')
-            return type_, name
+                array = bytes(n.value, 'latin-1') + bytes([0])
+                self.memory_init(name, type_, len(array), array, 'rodata')
+            return type_, (name, 0)
         else:
             return type_, cast_to_python_val(type_, n.value)
 
@@ -426,8 +465,6 @@ class Interpreter(c_ast.NodeVisitor):
         with self.context('expr'):
             arg_types, args = self.visit(n.args) if n.args else ([], [])
 
-        type_, _, body, _ = self.memory[name]
-
         # TODO: parse args for params / check types
         if self.memory[name]['type'][0][0] == '(builtin)':
             type_, val = self.memory[name]['array'][0](args)
@@ -518,14 +555,16 @@ class Interpreter(c_ast.NodeVisitor):
         elif n.op == '*':
             assert is_pointer_type(type_)
             arr, offset = val
+            # TODO: is this fine as long as we never actually dereference. like, maybe
+            # just for sizeof purposes?
             assert offset < self.memory[arr]['len']
             # TODO: dereference type_
-            return type_, self.memory[arr][offset]
+            return type_[1:], self.memory[arr]['array'][offset]
         elif n.op == '&':
             assert is_pointer_type(type_)
             arr, offset = val
-            # TODO: add pointer type
-            return type_, self.memory[arr][offset]
+            # TODO: add pointer type, but only if not func pointer/constant array
+            return ['*'] + type_, self.memory[arr]['array']
         else:
             return type_, unops[n.op](type_)(val)
 
@@ -550,7 +589,7 @@ if __name__=='__main__':
     interpret = Interpreter()
     parser = c_parser.CParser()
     try:
-        cfile = preprocess_file(sys.argv[1], cpp_path='cpp', cpp_args=[r'-I../fake_libc_include'])
+        cfile = preprocess_file(sys.argv[1], cpp_path='clang', cpp_args=['-E', r'-I../fake_libc_include'])
         ast = parser.parse(cfile)
     except Exception as e:
         print('uh oh2', e)
