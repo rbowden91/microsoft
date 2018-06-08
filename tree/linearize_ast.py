@@ -78,6 +78,8 @@ class LinearizeAST(c_ast.NodeVisitor):
         for (name, val) in nvlist:
             if name in ['value', 'op', 'name', 'declname']:
                 attr = val
+            elif name == 'names':
+                attr = ' '.join(val)
             else:
                 #print(name, val)
                 pass
