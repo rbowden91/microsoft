@@ -12,8 +12,9 @@ from pycparser import parse_file, c_parser, c_generator, c_ast, c_lexer
 from normalize import RemoveDecls, RemoveTypedefs, IDRenamer
 from linearize_ast import LinearizeAST
 
-cpp_args = ['-E', '-P', '-D__extension__=', '-D__attribute__(x)=', '-D__nonnull(x)=', '-D__restrict=',
-            '-D__THROW=', '-D__volatile__=', '-D__asm__(x)=', '-D__STRING_INLINE=', '-D__inline=']
+cpp_args = ['-E', '-P', '-nostdinc']
+#, '-D__extension__=', '-D__attribute__(x)=', '-D__nonnull(x)=', '-D__restrict=',
+#            '-D__THROW=', '-D__volatile__=', '-D__asm__(x)=', '-D__STRING_INLINE=', '-D__inline=']
             #"-D__builtin_va_list=char*"]
 
 # taken from pycparser, but extended to also return stderr

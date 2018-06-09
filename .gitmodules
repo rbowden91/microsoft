@@ -1,0 +1,9 @@
+[submodule "interpreter/c/musl"]
+	path = interpreter/c2/musl
+	url = git://git.musl-libc.org/musl
+[submodule "interpreter/c/libcs50"]
+	path = interpreter/c2/libcs50
+	url = https://github.com/cs50/libcs50
+[submodule "interpreter/cinterpy"]
+	path = interpreter/c
+	url = git@github.com:rbowden91/cinterpy.git
