@@ -18,6 +18,14 @@ $(document).ready(function() {
 
         $.post('submit_code', msg, function(data) {
             console.log(data);
+            var model = 'ast';//response.model;
+	    $('#heatmap').html("");
+	    if (data.success === false) {
+		$('#heatmap').text('Something went wrong! Maybe your code doesn\'t parse correctly?');
+	    } else {
+                heatmap = draw(data[model], model);
+                //displayCode(response.results.fixed_code);
+	    }
 	});
         return false;
     });

@@ -37,3 +37,20 @@ neither the 2015 nor the 2016 checks.
 * web/
 
 The frontend for student code submission and heatmap display.
+
+
+
+
+
+
+
+
+1)
+./parse.sh
+    Runs dump_ast.py on vigenere.c files in ../vigenere/correct15, generating tree_stripped.json for each file
+
+2)
+python3 tree_read.py ../vigenere/correct15/ ../data/tree5
+    Generates data files (where tokens have been converted to ids) from the tree_stripped.json files.
+    The "num_files" argument at the top of the file can be used to control how many files in the input_path should be
+    used.
