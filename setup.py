@@ -9,7 +9,7 @@ setup(name='repair50',
       author='Rob Bowden',
       author_email='rbowden91@gmail.com',
       license='GPLv3',
-      packages=['repair50'],
+      packages=['src'],
       install_requires=[
         'pycparser',
         'centipyde'

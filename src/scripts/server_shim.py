@@ -3,8 +3,7 @@ import os
 import json
 from typing import Dict
 
-sys.path.insert(0, '../..')
-from repair50 import server # type: ignore
+from ..server import server # type: ignore
 
 # TODO: send the possibilities for this to the server?
 config = server.load_data('../data/vig_no_decl100/ast/tmp')
