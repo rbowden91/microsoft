@@ -46,7 +46,7 @@ function handle_stdout(data) {
 
 
 function setup_child() {
-    child = spawn('python', ['../scripts/shim.py'], {stdio: 'pipe'});
+    child = spawn('repair50_shim', ['-p', '/home/rbowden/repos/repair50/data/training_data/vig_no_decl10/ast/tmp'], {stdio: 'pipe'});
 
     //child.stdout.setEncoding('utf8')
     // TODO: make sure the JSON message is complete?
