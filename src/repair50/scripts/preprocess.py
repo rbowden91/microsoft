@@ -19,11 +19,13 @@ from mypy_extensions import TypedDict
 parser = argparse.ArgumentParser(description='Tokenizer')
 parser.add_argument('filename', help='the name of the data files to process, such as caesar.c')
 parser.add_argument('read_path', help='directory to read from for processing')
+# TODO: make this optional
 parser.add_argument('store_path', help='directory to store processed data')
 parser.add_argument('-n', '--num_files', help='number of files to parse (default, all files)', type=int)
 parser.add_argument('-t', '--num_threads', help='number of concurrent threads (default 16)', type=int, default=16)
 parser.add_argument('--train_fraction', help='fraction of files for training', type=float, default=.8)
 parser.add_argument('--valid_fraction', help='fraction of files for validating', type=float, default=.1)
+parser.add_argument('--unit_tests', help='unit tests for these files', default=None)
 parser.add_argument('--unk_cutoff', help='fraction of files that need to have a token or else it\'s considered unknown', type=float, default=.01)
 
 def process_queue(queues, lexicon, lock, args):
@@ -34,7 +36,7 @@ def process_queue(queues, lexicon, lock, args):
         key = keys[i]
         while not queues[key]['queue'].empty():
             filename = queues[key]['queue'].get()
-            ast_data, linear_data = wrangle(filename, include_dependencies=False)
+            ast_data, linear_data = wrangle(filename, include_dependencies=False, tests=None)
             rows = {
                 'linear': process_linear(linear_data, key, lexicon, lock),
                 'ast': process_ast(ast_data, key, lexicon, lock)
@@ -47,9 +49,10 @@ def process_queue(queues, lexicon, lock, args):
 
 def main():
 
-    #parser.add_argument('-p', '--preserve_preprocesor', help='reinsert things like headers. for now, can\'t preserve #defines')
-    #parser.add_argument('-H', '--fake_headers', help='use fake C headers instead of the real ones for preprocessing', action='store_true')
     args = parser.parse_args()
+    if args.unit_tests is not None:
+        with open(args.unit_tests, 'r') as tests:
+            args.unit_tests = json.load(tests)
 
     files = glob.glob(os.path.join(os.getcwd(), args.read_path,'**',args.filename), recursive=True)
     random.shuffle(files)

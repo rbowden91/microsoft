@@ -3,7 +3,7 @@ from ..my_env.typing import List, Tuple
 from ..my_env.packages.pycparser import c_parser, c_generator, c_lexer
 from ..preprocessor.external import ExternalCPP
 
-from ..interpreter import Interpreter
+from centipyde.interpreter import run_tests
 from .normalize import RemoveDecls, RemoveTypedefs, IDRenamer
 from .linearize_ast import WrangledAST
 
@@ -39,7 +39,7 @@ def process_ast(ast, key=None, lexicon=None, lock=None):
             for j in ['label', 'attr']:
                 if key == "train" and data[j] not in local_lexicon[j]:
                     with lock:
-                        if data[j] not in local_lexicon[j]:
+                        if data[j] not in lexicon['ast_' + j + 's']:
                             lexicon['ast_' + j + 's'][data[j]] = 0
                         lexicon['ast_' + j + 's'][data[j]] += 1
                     local_lexicon[j].add(data[j])
@@ -124,13 +124,11 @@ def lex_code(code : str) -> List[str]:
     tokens.append("<eof>")
     return tokens
 
-def wrangle(code : str, test_name : str,  include_dependencies : bool = True, is_file=True) -> Tuple[WrangledAST,
-        List[str]] :
+def wrangle(code : str, include_dependencies : bool = True, is_file=True, tests=None) -> Tuple[WrangledAST, List[str]] :
     # these can raise exceptions that we'll let pass through
     cfile = ExternalCPP().preprocess(code, is_file)
     orig_ast = c_parser.CParser().parse(cfile)
-    interpreter = Interpreter(test_name)
-    results, visited = interpreter.run_tests(orig_ast)
+    results, visited = run_tests(orig_ast, tests) if tests is not None else None, None
 
     ast = RemoveDecls().visit(orig_ast)
     ast = RemoveTypedefs().visit(ast)
