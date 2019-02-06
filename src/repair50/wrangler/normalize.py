@@ -178,10 +178,10 @@ class SSAify(c_ast.NodeVisitor):
         return node
 
 class IDRenamer(c_ast.NodeVisitor):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, node_properties, *args, **kwargs):
         super(IDRenamer, self).__init__(*args, **kwargs)
 
-        self.node_name_map = {}
+        self.node_properties = {}
 
         self.id_map = {}
         self.reverse_id_map = {}
@@ -211,7 +211,8 @@ class IDRenamer(c_ast.NodeVisitor):
         self.visiting_decl = False
 
     def save_id(self, n, node, context=None):
-        self.node_name_map[node] = n
+        if node not in self.node_properties:
+            self.node_properties[node]['original_name'] = node
         if n in no_replace or n in typedefs.keys():
             return n
         # XXX don't want to rename something like "struct tmp tmp" to "struct STRUCT_ID1 STRUCT_ID1"
@@ -382,7 +383,6 @@ class IDRenamer(c_ast.NodeVisitor):
 
     def visit_IdentifierType(self, n):
         # is this necessary? will it only ever be the default "int", etc.?
-        # TODO: COPY NAMES INTO node_name_map for whole list?
         n.names = [self.save_id(i, n) for i in n.names]
         return n
 

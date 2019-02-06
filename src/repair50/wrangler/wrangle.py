@@ -132,8 +132,8 @@ def wrangle(code : str, test_name : str,  include_dependencies : bool = True, is
     interpreter = Interpreter(test_name)
     results, visited = interpreter.run_tests(orig_ast)
 
-    ast = RemoveDecls().visit(orig_ast)
-    ast = RemoveTypedefs().visit(ast)
+    #ast = RemoveDecls().visit(orig_ast)
+    ast = RemoveTypedefs().visit(orig_ast)
     renamer = IDRenamer()
     ast = renamer.visit(ast)
     name_map = renamer.node_name_map

@@ -20,7 +20,6 @@ class CGenerator(object):
         #
         self.indent_level = 0
         self.ast_data = ast_data
-        self.ast_data = ast_data
 
     def _make_indent(self):
         return ' ' * self.indent_level
