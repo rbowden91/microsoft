@@ -1,0 +1,8 @@
+s3_download.sh downloads all submissions to check50 from s3 into cs50_data/s3_unsorted_downloads
+group_downloads.sh then groups submissions together by problem, e.g., into cs50_data/s3_sorted_psets/vigenere
+preprocess.sh then , also removing any identical submissions
+#
+
+
+download_graded_submissions.py downloads submissions that received 2s, 3s, and 4s from TFs. None of these submissions
+are downloaded by s3_download.sh, since they are from a later instance of the course.

@@ -100,7 +100,6 @@ class WrangledAST(object):
 
         props = deepcopy(self.default_props)
         props.update({
-            'visited': {},
             'label': node.__class__.__name__,
             'first_sibling': self.left_sibling == 0,
             'num_children': len(children),
@@ -110,10 +109,13 @@ class WrangledAST(object):
             'parent_label': nodes[self.parent]['label'],
             'parent_attr': nodes[self.parent]['attr']
         })
-        for i in range(len(self.visited)):
-            if node in self.visited[i]:
-                props['visited'][i] = True
-                self.visited[i][node] = my_node_num
+        if self.visited is not None:
+            if 'visited' not in props:
+                props['visited'] = {}
+            for i in range(len(self.visited)):
+                if node in self.visited[i]:
+                    props['visited'][i] = True
+                    self.visited[i][node] = my_node_num
 
         props['forward'].update({
             'self': my_node_num,

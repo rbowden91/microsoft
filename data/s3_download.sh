@@ -7,8 +7,8 @@ download () {
     s3cmd get --recursive --force s3://sandbox50x/uploads/$num
 }
 
-mkdir -p tmp
-cd tmp
+mkdir -p cs50_data/s3_unsorted_downloads
+cd cs50_data/s3_unsorted_downloads
 for i in $(seq -f "%g" 00000 65535); do
     num=`printf "%04x" $i`
     children=$(($(pgrep --parent $$ | wc -l) - 1))

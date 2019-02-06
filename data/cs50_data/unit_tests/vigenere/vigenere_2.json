@@ -1,0 +1,62 @@
+[
+    {
+        "name": "test1",
+        "stdin": "a",
+        "argv": "./vigenere a",
+        "expected_stdout": "plaintext:\\s*a\\n",
+        "expected_return": 0
+    },
+    {
+        "name": "test2",
+        "stdin": "barfoo",
+        "argv": "./vigenere baz",
+        "expected_stdout": "caqgon\\n",
+        "expected_return": 0
+    },
+    {
+        "name": "test3",
+        "stdin": "BaRFoo",
+        "argv": "./vigenere BaZ",
+        "expected_stdout": "CaQGon\\n",
+        "expected_return": 0
+    },
+    {
+        "name": "test4",
+        "stdin": "BARFOO",
+        "argv": "./vigenere BAZ",
+        "expected_stdout": "CAQGON\\n",
+        "expected_return": 0
+    },
+    {
+        "name": "test5",
+        "stdin": "world!$?",
+        "argv": "./vigenere baz",
+        "expected_stdout": "xoqmd!\\$\\?\\n",
+        "expected_return": 0
+    },
+    {
+        "name": "test6",
+        "stdin": "world, say hello!",
+        "argv": "./vigenere baz",
+        "expected_stdout": "xoqmd, rby gflkp!\\n",
+        "expected_return": 0
+    },
+    {
+        "name": "test7",
+        "stdin": "",
+        "argv": "./vigenere",
+        "expected_return": 1
+    },
+    {
+        "name": "test8",
+        "stdin": "",
+        "argv": "./vigenere 1 2 3",
+        "expected_return": 1
+    },
+    {
+        "name": "test9",
+        "stdin": "",
+        "argv": "./vigenere HaX0r2",
+        "expected_return": 1
+    }
+]
