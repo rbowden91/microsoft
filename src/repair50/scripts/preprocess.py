@@ -46,7 +46,6 @@ def process_queue(queues, lexicon, lock, args):
                     queues[key][j].append(rows[j])
             queues[key]['queue'].task_done()
 
-
 def main():
 
     args = parser.parse_args()
@@ -75,9 +74,8 @@ def main():
             queues['test']['queue'].put(files[i])
 
     lexicon : Any = {
-        'ast_labels': {},
-        'ast_attrs': {},
-        'linear_tokens': {}
+        'ast': {'label': {}, 'attr': {}},
+        'linear': {'label': {}}
     }
     lock = Lock()
     for i in range(args.num_threads):
@@ -90,9 +88,9 @@ def main():
 
     cutoff = args.num_files * args.train_fraction * args.unk_cutoff
 
-    ast_labels = set([label for label in lexicon['ast_labels'] if lexicon['ast_labels'][label] > cutoff])
-    ast_attrs = set([attr for attr in lexicon['ast_attrs'] if lexicon['ast_attrs'][attr] > cutoff])
-    linear_tokens = set([token for token in lexicon['linear_tokens'] if lexicon['linear_tokens'][token] > cutoff])
+    ast_labels = set([label for label in lexicon['ast']['label'] if lexicon['ast']['label'][label] > cutoff])
+    ast_attrs = set([attr for attr in lexicon['ast']['attr'] if lexicon['ast']['attr'][attr] > cutoff])
+    linear_tokens = set([token for token in lexicon['linear']['label'] if lexicon['linear']['label'][token] > cutoff])
 
     lexicon = {'ast': {}, 'linear': {}}
     lexicon['ast']['label'] = dict(zip(ast_labels, range(1, len(ast_labels) + 1)))
@@ -114,11 +112,9 @@ def main():
             writer = tf.python_io.TFRecordWriter(os.path.join(args.store_path, model + '_' + k + '.tfrecord'))
             for i in range(len(queues[k][model])): # type: ignore
                 row = finish_row(queues[k][model][i], lexicon[model], # type: ignore
-                                 queues['train']['ast'][0].keys() if model == 'linear' else None)
-
+                                 queues['train']['ast'][0] if model == 'linear' else None)
                 features = {}
                 for j in row:
-                    # add in 0 for the nil slot
                     features[j] = tf.train.Feature(int64_list=tf.train.Int64List(value=row[j]))
                 example = tf.train.Example(features=tf.train.Features(feature=features))
                 writer.write(example.SerializeToString())

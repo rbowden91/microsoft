@@ -1,11 +1,11 @@
 import tensorflow as tf
+import einops as e
 from .tensorarray import RNNTensorArray, RNNTensorArrayCell, define_scope
 
 from .config import dependency_configs, joint_configs
 
 def data_type():
     return tf.float32
-
 
 
 class TRNNBaseModel(object):
@@ -42,6 +42,24 @@ class TRNNBaseModel(object):
         }
 
     @define_scope
+    def reconstruct_example(self, rows, new_rows, keys):
+        key = keys.pop(0)
+        if len(keys) == 0:
+            new_rows[key] = rows
+        else:
+            # handle the pointer stuff
+            if keys[0].isdigit():
+                if key not in new_rows:
+                    # TODO ROB: this is the hard-coded max pointer memory size
+                    new_rows[key] = [0] * self.mem_size
+                new_rows[key][int(keys[0])] = rows
+                return
+            if key not in new_rows:
+                new_rows[key] = {}
+            self.reconstruct_example(rows, new_rows[key], keys)
+
+
+    @define_scope
     def calculate_loss_and_tvars(self, labels, logits):
         loss = {}
         probabilities = {}
@@ -55,7 +73,8 @@ class TRNNBaseModel(object):
             else:
                 cross, predict = (tf.nn.sigmoid_cross_entropy_with_logits, tf.nn.sigmoid) if len(logits[k].shape) == 2 \
                                 else (tf.nn.sparse_softmax_cross_entropy_with_logits, tf.nn.softmax)
-            loss[k] = tf.reduce_sum(cross(labels=labels[k], logits=logits[k]) * mask) / num_tokens
+            new_mask = tf.tile(tf.expand_dims(mask,axis=2), [1,1,self.mem_size]) if k in 'pointers' else mask
+            loss[k] = tf.reduce_sum(cross(labels=labels[k], logits=logits[k]) * new_mask) / num_tokens
             total_loss += loss[k]
             probabilities[k] = predict(logits[k])
         # TODO: a tvar can appear multiple times. But we want to clip norms for losses separately???
@@ -116,6 +135,7 @@ class TRNNBaseModel(object):
         self.label_size = label_size
         self.attr_size = attr_size
         self.hidden_size = hidden_size
+        self.mem_size = 20
         self.features = features
         self.num_layers = num_layers
         self.max_grad_norm = max_grad_norm
@@ -152,21 +172,17 @@ class TRNNBaseModel(object):
                 self.placeholders.update(iter_placeholders)
                 self.ops.update(iter_ops)
                 # this is to handle the fact that we couldn't do a nested dictionary in preprocessing
-                rows = {
-                    'forward': {},
-                    'reverse': {}
-                }
+                rows = {}
                 for k in self.rows:
-                    split = k.split('_')
-                    direction = split.pop(0)
-                    rest = '_'.join(split)
-                    rows[direction][rest] = self.rows[k]
-
+                    self.reconstruct_example(self.rows[k], rows, k.split('-'))
+                for i in ['forward', 'reverse']:
+                    for j in ['memory', 'mask']:
+                        rows[i]['pointers'][j] = e.rearrange(rows[i]['pointers'][j], 'm b n -> b n m');
             self.rows = rows
 
             # num_rows does not always equal batch size, if we got a small batch
-            self.num_rows = tf.shape(self.rows['forward']['label_index'])[0]
-            self.data_length = tf.shape(self.rows['forward']['label_index'])[1]
+            self.num_rows = tf.shape(self.rows['label_index'])[0]
+            self.data_length = tf.shape(self.rows['label_index'])[1]
             self.params = self.declare_params()
 
             self.global_step = tf.get_variable('global_step', dtype=tf.int32, initializer=0, trainable=False)
@@ -275,30 +291,54 @@ class TRNNModel(TRNNBaseModel):
 
         # this is the only directional loss that linear uses
         logits['label_index'] = tf.matmul(h_pred, tile(p['label_w'])) + p['label_b']
-        labels['label_index'] = self.rows[direction]['label_index']
+        labels['label_index'] = self.rows['label_index']
 
         if self.model == 'ast':
-            # only attrs for constants and IDs?
-            attr_w = tf.gather(p['attr_w'], self.rows[direction]['label_index'])
-            attr_b = tf.gather(p['attr_b'], self.rows[direction]['label_index'])
+            attr_w = tf.gather(p['attr_w'], self.rows['label_index'])
+            attr_b = tf.gather(p['attr_b'], self.rows['label_index'])
             logits['attr_index'] = tf.squeeze(tf.matmul(tf.expand_dims(h_pred, axis=2), attr_w), axis=2) + attr_b
-            labels['attr_index'] = self.rows[direction]['attr_index']
+            labels['attr_index'] = self.rows['attr_index']
 
             # loss for whether we are the last sibling on the left or right
             end = 'last_sibling' if (direction == 'forward') == forward_array else 'first_sibling'
-            #print(self.rows)
-            u_end = tf.gather_nd(p['u_end'], tf.stack([self.rows[direction]['label_index'], self.rows[direction]['attr_index']], axis=2))
+            u_end = tf.gather_nd(p['u_end'], tf.stack([self.rows['label_index'], self.rows['attr_index']], axis=2))
             # TODO: bias?
             logits[end] = tf.reduce_sum(tf.multiply(u_end, h_pred), axis=2)
-            labels[end] = tf.cast(self.rows[direction][end], data_type())
+            labels[end] = tf.cast(self.rows[end], data_type())
+
+            #params['pointers_w1'] = tf.get_variable("pointers_w1", [1, 20, size, 20], dtype=data_type())
+            #params['pointers_w2'] = tf.get_variable("pointers_w2", [1, size, 20], dtype=data_type())
+            #params['pointers_v'] = tf.get_variable("pointers_v", [1, size, 20], dtype=data_type())
+
+            # hpred: shape = [batch, nodes, hidden_size]
+            # self.rows[direction]['pointers']['memory']: shape = [batch, nodes, mem_size]
+
+            # shpae = [batch, nodes, (hidden_size + mem_size)]
+            elems = tf.concat([h_pred, tf.cast(self.rows[direction]['pointers']['memory'], tf.float32)], axis=2)
+
+            def pointer_map(elems):
+                h_pred = elems[:,:self.hidden_size]
+                mem = tf.cast(elems[:,self.hidden_size:], tf.int32)
+                return tf.gather(h_pred, mem)
+
+
+            # shape = [batch, nodes, mem, size]
+            pointers = tf.map_fn(pointer_map, elems)
+
+            # tensordot generalizes matrix multiplication over batch_size and num_nodes
+            w1 = tf.tensordot(pointers, p['pointers_w1'], [[3],[0]])
+            w2 = tf.tensordot(h_pred, p['pointers_w2'], [[2],[0]])
+            w2 = tf.reshape(w2, [self.num_rows, self.data_length, self.mem_size, self.hidden_size])
+            logits['pointers'] = p['pointers_v'] * tf.tanh(w1 + w2) + p['pointers_b']
+            labels['pointers'] = self.rows[direction]['pointers']['mask']
 
 
         return labels, logits
 
     @define_scope
     def embed(self, index, direction, parent=False):
-        label_index = self.rows[direction]['label_index' if not parent else 'parent_label_index'][:,index]
-        attr_index = self.rows[direction]['attr_index' if not parent else 'parent_attr_index'][:,index]
+        label_index = self.rows['label_index' if not parent else 'parent_label_index'][:,index]
+        attr_index = self.rows['attr_index' if not parent else 'parent_attr_index'][:,index]
 
         node_label_embedding = tf.gather(self.params['label_embed'], label_index, name="LabelEmbedGather", axis=0)
         node_attr_embedding = tf.gather(self.params['attr_embed'], attr_index, name="AttrEmbedGather", axis=0)
@@ -328,6 +368,11 @@ class TRNNModel(TRNNBaseModel):
 
         params['label_w'] = tf.get_variable("label_w", [1, size, label_size], dtype=data_type())
         params['label_b'] = tf.get_variable("label_b", [1, label_size], dtype=data_type())
+
+        params['pointers_w1'] = tf.get_variable("pointers_w1", [size, size], dtype=data_type())
+        params['pointers_w2'] = tf.get_variable("pointers_w2", [size, self.mem_size * size], dtype=data_type())
+        params['pointers_v'] = tf.get_variable("pointers_v", [1, 1, self.mem_size, size], dtype=data_type())
+        params['pointers_b'] = tf.get_variable("pointers_b", [1, 1, self.mem_size, size], dtype=data_type())
 
         #if d == 'reverse':
         #    p[d]['u_right_hole'] = tf.get_variable('u_right_hole', [1, size * 2], dtype=data_type())
@@ -378,13 +423,13 @@ class TRNNModel(TRNNBaseModel):
                         dependency_idx = gather_dependency(dependency)
                     add_idx = None
                 else:
-                    dependency_idx = gather_dependency('right_child')
+                    dependency_idx = gather_dependency('left_child')
 
                     parent_idx = gather_dependency('parent')
                     parent_inp = get_input(parent_idx, parent=True)
                     inp = tf.stack([inp, parent_inp])
 
-                    right_sibling = gather_dependency('left_sibling')
+                    right_sibling = gather_dependency('right_sibling')
                     add_idx = right_sibling if layer == self.num_layers - 1 else None
 
                 #if dependency != 'children':
@@ -398,7 +443,7 @@ class TRNNModel(TRNNBaseModel):
 
     @define_scope
     def calculate_hpred(self):
-        self.h_pred = tf.zeros([self.num_rows, self.data_length, self.hidden_size])
+        h_pred = tf.zeros([self.num_rows, self.data_length, self.hidden_size])
         with tf.name_scope('main_loop_body'):
             all_dependencies = set()
             end_ctr = None
@@ -431,10 +476,10 @@ class TRNNModel(TRNNBaseModel):
 
                 if 'U' in self.params:
                     predicted_output = tf.matmul(predicted_output, tf.tile(self.params['U'][dependency], [self.num_rows, 1, 1]))
-                self.h_pred += predicted_output
+                h_pred += predicted_output
 
             # the very last traversal gives us the generation direction
-            return self.h_pred, direction, forward_array
+            return h_pred, direction, forward_array
 
 
     def __init__(self, *args, **kwargs):

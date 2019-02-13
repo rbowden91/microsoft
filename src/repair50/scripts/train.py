@@ -193,8 +193,6 @@ class Trainer(object):
             with tf.Session() as session:
                 self.session = session
 
-                coord = tf.train.Coordinator()
-                threads = tf.train.start_queue_runners(coord=coord)
 
                 ckpt = tf.train.get_checkpoint_state(config['checkpoint_dir'])
                 if ckpt:
@@ -240,8 +238,6 @@ class Trainer(object):
 
                 test_perplexity = self.run_epoch('test')
                 config['test_perplexity'] = test_perplexity
-            coord.request_stop()
-            coord.join(threads)
 
             # store the placeholder/op/fetch tensor names in our config
             outputs = {}

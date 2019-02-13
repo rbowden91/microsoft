@@ -1,286 +1,393 @@
-#------------------------------------------------------------------------------
-# pycparser: c_generator.py
-#
-# C code generator from pycparser AST nodes.
-#
-# Eli Bendersky [https://eli.thegreenplace.net/]
-# License: BSD
-#------------------------------------------------------------------------------
+# based heavily on the version from pycparser
+
 from pycparser import c_ast
 
 
 class CGenerator(object):
-    """ Uses the same visitor pattern as c_ast.NodeVisitor, but modified to
-        return a value from each visit method, using string accumulation in
-        generic_visit.
-    """
     def __init__(self, ast_data):
         # Statements start with indentation of self.indent_level spaces, using
         # the _make_indent method
         #
         self.indent_level = 0
+        self.line = 1
         self.ast_data = ast_data
 
+    def _mp(self, class_, value):
+        return { 'class': class_, 'value': value }
+
+    def _make_space(self):
+        return self._mp('whitespace', False)
+
     def _make_indent(self):
-        return ' ' * self.indent_level
+        return self._mp('indent', self.indent_level)
+
+    def _make_newline(self):
+        self.line += 1
+        return self._mp('newline', self.line)
+
+    def _make_raw(self, raw):
+        return self._mp('raw', raw)
+
+    def _make_id(self, id_):
+        if id_ in ('string', 'int', 'double', 'float', 'long', 'char', 'bool', 'short'):
+            return self._mp('keyword', id_)
+        elif id_ in ('printf', 'strlen', 'toupper', 'tolower', 'isupper', 'islower', 'argc', 'argv', 'isalpha', 'main'):
+            return self._mp('built_in', id_)
+        return self._make_raw(id_)
+
+    def _paren(self, ret):
+        if not isinstance(ret, list):
+            ret = [ret]
+        ret.insert(0, self._make_raw('('))
+        ret.append(self._make_raw(')'))
+        return ret
+
+    def _bracket(self, ret):
+        if not isinstance(ret, list):
+            ret = [ret]
+        ret.insert(0, self._make_raw('['))
+        ret.append(self._make_raw(']'))
+        return ret
+
+    def _brace(self, ret):
+        if not isinstance(ret, list):
+            ret = [ret]
+        ret.insert(0, self._make_raw('{'))
+        ret.insert(0, self._make_indent())
+        ret.append(self._make_indent())
+        ret.append(self._make_raw('}'))
+        return ret
+
+
+    def _get_id(self, node):
+        return self.ast_data.node_properties[node]['node_num']
 
     def visit(self, node):
         if node is None:
-            return ''
+            return {'class': 'empty'}#{'id': self.ast_data.node_properties[node]['forward']['self'], 'value': []}
+
         method = 'visit_' + node.__class__.__name__
 
-        if node in self.ast_data.name_map:
-            if hasattr(node, 'name'):
-                node.name = self.ast_data.name_map[node]
-            if hasattr(node, 'declname'):
-                node.declname = self.ast_data.name_map[node]
-            #if 'names' in self.ast_data.name_map[node]:
-            #    node.names = []
-            #    for i in self.ast_data.name_map[node]['names']:
-            #        node.names.append(i)
-
-        ret = '<span id="node-' + str(self.ast_data.node_properties[node]['forward']['self']) + '">'
-        ret += getattr(self, method, self.generic_visit)(node)
-        ret += '</span>'
+        #if node in self.ast_data.node_properties and 'original_name' in self.ast_data.node_properties[node]:
+        #    if hasattr(node, 'name'):
+        #        node.name = self.ast_data.node_properties[node]['original_name']
+        #    elif hasattr(node, 'declname'):
+        #        node.declname = self.ast_data.name_map[node]
+        #    #if 'names' in self.ast_data.name_map[node]:
+        #    #    node.names = []
+        #    #    for i in self.ast_data.name_map[node]['names']:
+        #    #        node.names.append(i)
+        lineno = self.line
+        ret = {'value': getattr(self, method)(node), 'class': 'node',
+                'id': self._get_id(node)}
+        ret['starting_line'] = lineno
+        ret['ending_line'] = self.line
+        ret.update(self.ast_data.node_properties[node])
+        for k in ['self', 'dependencies', 'cells']:
+            if k in ret:
+                del(ret[k])
         return ret
 
-    def generic_visit(self, node):
-        return ''.join(self.visit(c) for c_name, c in node.children())
+    #def generic_visit(self, node):
+    #    return ''.join(self.visit(c) for c_name, c in node.children())
 
     def visit_Constant(self, n):
-        return n.value
+        if n.value.startswith('"'):
+            class_ = 'string'
+        elif n.value.startswith("'"):
+            class_ = 'char'
+        else:
+            class_ = 'number'
+        return [self._mp(class_, n.value)]
 
     def visit_ID(self, n):
-        return n.name
+        if n in self.ast_data.node_properties and 'original_name' in self.ast_data.node_properties[n]:
+            name = self.ast_data.node_properties[n]['original_name']
+        else:
+            name = n.name
+        return [self._make_id(name)]
 
     def visit_Pragma(self, n):
-        ret = '#pragma'
+        ret = [self._make_raw('#'), self._mp('keyword', '#pragma')]
         if n.string:
-            ret += ' ' + n.string
+            ret.extend([self._make_space(), self._make_raw(n.string)])
         return ret
 
     def visit_ArrayRef(self, n):
-        arrref = self._parenthesize_unless_simple(n.name)
-        return arrref + '[' + self.visit(n.subscript) + ']'
+        ret = self._parenthesize_unless_simple(n.name)
+        ret.extend(self._bracket(self.visit(n.subscript)))
+        return ret
 
     def visit_StructRef(self, n):
-        sref = self._parenthesize_unless_simple(n.name)
-        return sref + n.type + self.visit(n.field)
+        ret = self._parenthesize_unless_simple(n.name)
+        ret.extend([self._make_raw(n.type), self.visit(n.field)])
+        return ret
 
     def visit_FuncCall(self, n):
-        fref = self._parenthesize_unless_simple(n.name)
-        return fref + '(' + self.visit(n.args) + ')'
+        ret = self._parenthesize_unless_simple(n.name)
+        ret.extend(self._paren(self.visit(n.args)))
+        return ret
 
     def visit_UnaryOp(self, n):
-        operand = self._parenthesize_unless_simple(n.expr)
+        ret = self._parenthesize_unless_simple(n.expr)
         if n.op == 'p++':
-            return '%s++' % operand
+            ret.append(self._make_raw('++'))
         elif n.op == 'p--':
-            return '%s--' % operand
+            ret.append(self._make_raw('--'))
         elif n.op == 'sizeof':
             # Always parenthesize the argument of sizeof since it can be
             # a name.
-            return 'sizeof(%s)' % self.visit(n.expr)
+            ret.append(self._mp('keyword', 'sizeof'))
+            ret.extend(self._paren(self.visit(n.expr)))
         else:
-            return '%s%s' % (n.op, operand)
+            ret.insert(0, self._make_raw(n.op))
+        return ret
 
     def visit_BinaryOp(self, n):
-        lval_str = self._parenthesize_if(n.left,
+        ret = self._parenthesize_if(n.left,
                             lambda d: not self._is_simple_node(d))
-        rval_str = self._parenthesize_if(n.right,
-                            lambda d: not self._is_simple_node(d))
-        return '%s %s %s' % (lval_str, n.op, rval_str)
+        ret.append(self._make_raw(n.op))
+        ret.extend(self._parenthesize_if(n.right,
+                            lambda d: not self._is_simple_node(d)))
+        return ret
 
     def visit_Assignment(self, n):
-        rval_str = self._parenthesize_if(
+        ret = [self.visit(n.lvalue), self._make_raw(n.op)]
+        ret.extend(self._parenthesize_if(
                             n.rvalue,
-                            lambda n: isinstance(n, c_ast.Assignment))
-        return '%s %s %s' % (self.visit(n.lvalue), n.op, rval_str)
+                            lambda n: isinstance(n, c_ast.Assignment)))
+        return ret
 
     def visit_IdentifierType(self, n):
-        return ' '.join(n.names)
+        ret = []
+        for name in n.names:
+            if len(ret) != 0:
+                ret.append(self._make_space())
+            ret.append(self._make_id(name))
+        return ret
 
     def _visit_expr(self, n):
+        ret = [self.visit(n)]
         if isinstance(n, c_ast.InitList):
-            return '{' + self.visit(n) + '}'
+            self._brace(ret)
         elif isinstance(n, c_ast.ExprList):
-            return '(' + self.visit(n) + ')'
-        else:
-            return self.visit(n)
+            self._paren(ret)
+        return ret
 
     def visit_Decl(self, n, no_type=False):
         # no_type is used when a Decl is part of a DeclList, where the type is
         # explicitly only for the first declaration in a list.
         #
-        s = n.name if no_type else self._generate_decl(n)
-        if n.bitsize: s += ' : ' + self.visit(n.bitsize)
+        ret = []
+        props = self.ast_data.node_properties[n]
+        if 'no_type' in props:
+            name = n.name if 'original_name' not in props else props['original_name']
+            ret.append(self._make_id(name))
+        else:
+            ret.extend(self._generate_decl(n))
+
+        if n.bitsize:
+            ret.extend([self._make_space(), self._make_raw(':'), self._make_space()])
+            ret.append(self.visit(n.bitsize))
         if n.init:
-            s += ' = ' + self._visit_expr(n.init)
-        return s
+            ret.extend([self._make_space(), self._make_raw('='), self._make_space()])
+            ret.extend(self._visit_expr(n.init))
+        return ret
 
     def visit_DeclList(self, n):
-        s = self.visit(n.decls[0])
-        if len(n.decls) > 1:
-            s += ', ' + ', '.join(self.visit_Decl(decl, no_type=True)
-                                    for decl in n.decls[1:])
-        return s
+        ret = [self.visit(n.decls[0])]
+        for i in range(1, len(n.decls)):
+            ret.extend([self._make_raw(','), self._make_space()])
+            self.ast_data.node_properties[n.decls[i]]['no_type'] = True
+            ret.append(self.visit(n.decls[i]))
+        return ret
 
     def visit_Typedef(self, n):
-        s = ''
-        if n.storage: s += ' '.join(n.storage) + ' '
-        s += self._generate_type(n.type)
-        return s
+        ret = []
+        if n.storage:
+            for i in n.storage:
+                ret.extend([self._make_raw(i), self._make_space()])
+        ret.extend(self._generate_type(n.type))
+        return ret
 
     def visit_Cast(self, n):
-        s = '(' + self._generate_type(n.to_type) + ')'
-        return s + ' ' + self._parenthesize_unless_simple(n.expr)
+        ret = self.generate_type(n.to_type)
+        self._paren(ret)
+        ret.append(self._make_space())
+        ret.extend(self._parenthesize_unless_simple(n.expr))
+        return ret
 
     def visit_ExprList(self, n):
-        visited_subexprs = []
+        ret = []
         for expr in n.exprs:
-            visited_subexprs.append(self._visit_expr(expr))
-        return ', '.join(visited_subexprs)
+            if len(ret) > 0:
+                ret.extend([self._make_raw(','), self._make_space()])
+            ret.extend(self._visit_expr(expr))
+        return ret
 
     def visit_InitList(self, n):
-        visited_subexprs = []
+        ret = []
         for expr in n.exprs:
-            visited_subexprs.append(self._visit_expr(expr))
-        return ', '.join(visited_subexprs)
+            if len(ret) > 0:
+                ret.extend([self._make_raw(','), self._make_space()])
+            ret.extend(self._visit_expr(expr))
+        return ret
 
     def visit_Enum(self, n):
-        return self._generate_struct_union_enum(n, name='enum')
+        return self._generate_struct_union_enum(n, 'enum')
 
     def visit_Enumerator(self, n):
-        if not n.value:
-            return '{indent}{name},\n'.format(
-                indent=self._make_indent(),
-                name=n.name,
-            )
-        else:
-            return '{indent}{name} = {value},\n'.format(
-                indent=self._make_indent(),
-                name=n.name,
-                value=self.visit(n.value),
-            )
+        ret = [self._make_indent(), self._make_raw(n.name)]
+        if n.value:
+            ret.extend([self._make_space(), self._make_raw('='), self._make_space()])
+            ret.append(self.visit(n.value))
+            ret.append(self._make_raw(','))
+        ret.append(self._make_newline())
+        return ret
 
     def visit_FuncDef(self, n):
         decl = self.visit(n.decl)
+        nl1 = self._make_newline()
         self.indent_level = 0
         body = self.visit(n.body)
+        nl2 = self._make_newline()
         if n.param_decls:
-            knrdecls = ';\n'.join(self.visit(p) for p in n.param_decls)
-            return decl + '\n' + knrdecls + ';\n' + body + '\n'
+            return ''
+            # TODO
+            #knrdecls = ';\n'.join(self.visit(p) for p in n.param_decls)
+            #return decl + '\n' + knrdecls + ';\n' + body + '\n'
         else:
-            return decl + '\n' + body + '\n'
+            return [decl, nl1, body, nl2]
 
     def visit_FileAST(self, n):
-        s = ''
+        ret = []
         for ext in n.ext:
-            if isinstance(ext, c_ast.FuncDef):
-                s += self.visit(ext)
-            elif isinstance(ext, c_ast.Pragma):
-                s += self.visit(ext) + '\n'
-            else:
-                s += self.visit(ext) + ';\n'
-        return s
+            ret.append(self.visit(ext))
+            if isinstance(ext, c_ast.Pragma):
+                ret.append(self._make_newline())
+            elif not isinstance(ext, c_ast.FuncDef):
+                ret.extend([self._make_raw(';'), self._make_newline()])
+        return ret
 
     def visit_Compound(self, n):
-        s = self._make_indent() + '{\n'
-        self.indent_level += 2
+        ret = [self._make_newline()]
+        self.indent_level += 1
         if n.block_items:
-            s += ''.join(self._generate_stmt(stmt) for stmt in n.block_items)
-        self.indent_level -= 2
-        s += self._make_indent() + '}\n'
-        return s
+            [ret.append(self._generate_stmt(stmt)) for stmt in n.block_items]
+        self.indent_level -= 1
+        self._brace(ret)
+        ret.append(self._make_newline())
+        return ret
 
     def visit_CompoundLiteral(self, n):
-        return '(' + self.visit(n.type) + '){' + self.visit(n.init) + '}'
+        ret = self._paren(self.visit(n.type))
+        ret.extend(self._brace(self.visit(n.init)))
+        return ret
 
 
     def visit_EmptyStatement(self, n):
-        return ';'
+        return [self._make_raw(';')]
 
     def visit_ParamList(self, n):
-        return ', '.join(self.visit(param) for param in n.params)
+        ret = []
+        for param in n.params:
+            if len(ret) > 0:
+                ret.extend([self._make_raw(','), self._make_space()])
+            ret.append(self.visit(param))
+        return ret
 
     def visit_Return(self, n):
-        s = 'return'
-        if n.expr: s += ' ' + self.visit(n.expr)
-        return s + ';'
+        ret = [self._mp('keyword', 'return')]
+        if n.expr:
+            ret.append(self._make_space())
+            ret.append(self.visit(n.expr))
+        ret.append(self._make_raw(';'))
+        return ret
 
     def visit_Break(self, n):
-        return 'break;'
+        return [self._mp('keyword', 'break'), self._make_raw(';')]
 
     def visit_Continue(self, n):
-        return 'continue;'
+        return [self._mp('keyword', 'continue'), self._make_raw(';')]
 
     def visit_TernaryOp(self, n):
-        s  = '(' + self._visit_expr(n.cond) + ') ? '
-        s += '(' + self._visit_expr(n.iftrue) + ') : '
-        s += '(' + self._visit_expr(n.iffalse) + ')'
-        return s
+        return [self._paren(self._visit_expr(n.cond)),
+                self._make_space(), self.make_raw('?'), self._make_space(),
+                self._paren(self._visit_expr(n.iftrue)),
+                self._make_space(), self.make_raw(':'), self._make_space(),
+                self._paren(self._visit_expr(n.iffalse))]
 
     def visit_If(self, n):
-        s = 'if ('
-        if n.cond: s += self.visit(n.cond)
-        s += ')\n'
-        s += self._generate_stmt(n.iftrue, add_indent=True)
+        ret = [self._mp('keyword', 'if'), self._make_space()]
+        cond = self.visit(n.cond) if n.cond else []
+        ret.extend(self._paren(cond))
+        ret.append(self._make_newline())
+        ret.append(self._generate_stmt(n.iftrue, add_indent=True))
         if n.iffalse:
-            s += self._make_indent() + 'else\n'
-            s += self._generate_stmt(n.iffalse, add_indent=True)
-        return s
+            ret.extend([self._make_indent(), self._mp('keyword', 'else'), self._make_newline()])
+            ret.append(self._generate_stmt(n.iffalse, add_indent=True))
+        return ret
 
     def visit_For(self, n):
-        s = 'for ('
-        if n.init: s += self.visit(n.init)
-        s += ';'
-        if n.cond: s += ' ' + self.visit(n.cond)
-        s += ';'
-        if n.next: s += ' ' + self.visit(n.next)
-        s += ')\n'
-        s += self._generate_stmt(n.stmt, add_indent=True)
-        return s
+        ret = [self._mp('keyword', 'for'), self._make_space()]
+        inner = []
+        if n.init: inner.append(self.visit(n.init))
+        inner.append(self._make_raw(';'))
+        if n.cond: inner.extend([self._make_space(), self.visit(n.cond)])
+        inner.append(self._make_raw(';'))
+        if n.next: inner.extend([self._make_space(), self.visit(n.next)])
+        ret.extend(self._paren(inner))
+        ret.append(self._make_newline())
+        ret.append(self._generate_stmt(n.stmt, add_indent=True))
+        return ret
 
     def visit_While(self, n):
-        s = 'while ('
-        if n.cond: s += self.visit(n.cond)
-        s += ')\n'
-        s += self._generate_stmt(n.stmt, add_indent=True)
-        return s
+        ret = [self._mp('keyword', 'while'), self._make_space()]
+        inner = []
+        if n.cond: inner.extend([self._make_space(), self.visit(n.cond)])
+        ret.extend(self._paren(inner))
+        ret.append(self._make_newline())
+        ret.append(self._generate_stmt(n.stmt, add_indent=True))
+        return ret
 
     def visit_DoWhile(self, n):
-        s = 'do\n'
-        s += self._generate_stmt(n.stmt, add_indent=True)
-        s += self._make_indent() + 'while ('
-        if n.cond: s += self.visit(n.cond)
-        s += ');'
-        return s
+        ret = [self._mp('keyword', 'do'), self._make_newline()]
+        ret.append(self._generate_stmt(n.stmt, add_indent=True))
+        ret.extend([self._make_indent(), self._mp('keyword', 'while'), self._make_space()])
+        ret.extend(self._paren(self.visit(n.cond) if n.cond else []))
+        ret.append(self._make_raw(';'))
+        return ret
 
     def visit_Switch(self, n):
-        s = 'switch (' + self.visit(n.cond) + ')\n'
-        s += self._generate_stmt(n.stmt, add_indent=True)
-        return s
+        ret = [self._mp('keyword', 'switch'), self._make_space()]
+        ret.extend(self._paren(self.visit(n.cond)))
+        ret.append(self._make_newline())
+        ret.append(self._generate_stmt(n.stmt, add_indent=True))
+        return ret
 
     def visit_Case(self, n):
-        s = 'case ' + self.visit(n.expr) + ':\n'
+        ret = [self._mp('keyword', 'case'), self._make_space(),
+               self.visit(n.expr), self._make_raw(':'), self._make_newline()]
         for stmt in n.stmts:
-            s += self._generate_stmt(stmt, add_indent=True)
-        return s
+            ret.append(self._generate_stmt(stmt, add_indent=True))
+        return ret
 
     def visit_Default(self, n):
-        s = 'default:\n'
+        ret = [self._mp('keyword', 'default'), self._make_raw(':'), self._make_newline()]
         for stmt in n.stmts:
-            s += self._generate_stmt(stmt, add_indent=True)
-        return s
+            ret.append(self._generate_stmt(stmt, add_indent=True))
+        return ret
 
     def visit_Label(self, n):
-        return n.name + ':\n' + self._generate_stmt(n.stmt)
+        ret = [self._make_raw(n.name), self._make_raw(':'), self._make_newline()]
+        ret.append(self._generate_stmt(n.stmt))
+        return ret
 
     def visit_Goto(self, n):
-        return 'goto ' + n.name + ';'
+        ret = [self._mp('keyword', 'goto'), self._make_space(), self._make_raw(n.name), self._make_raw(';')]
 
     def visit_EllipsisParam(self, n):
-        return '...'
+        return [self._make_raw('...')]
 
     def visit_Struct(self, n):
         return self._generate_struct_union_enum(n, 'struct')
@@ -292,14 +399,15 @@ class CGenerator(object):
         return self._generate_struct_union_enum(n, 'union')
 
     def visit_NamedInitializer(self, n):
-        s = ''
+        ret = []
         for name in n.name:
             if isinstance(name, c_ast.ID):
-                s += '.' + name.name
+                ret.extend([self._make_raw('.'), self.visit(name)])
             else:
-                s += '[' + self.visit(name) + ']'
-        s += ' = ' + self._visit_expr(n.expr)
-        return s
+                ret.extend(self._bracket(self.visit(name)))
+        ret.extend([self._make_space(), self._make_raw('='), self._make_space()])
+        ret.extend(self._visit_expr(n.expr))
+        return ret
 
     def visit_FuncDecl(self, n):
         return self._generate_type(n)
@@ -308,6 +416,7 @@ class CGenerator(object):
         """ Generates code for structs, unions, and enums. name should be
             'struct', 'union', or 'enum'.
         """
+        ret = []
         if name in ('struct', 'union'):
             members = n.decls
             body_function = self._generate_struct_union_body
@@ -315,25 +424,30 @@ class CGenerator(object):
             assert name == 'enum'
             members = None if n.values is None else n.values.enumerators
             body_function = self._generate_enum_body
-        s = name + ' ' + (n.name or '')
+        ret.append(name + ' ' + (n.name or ''))
+        ret.extend(self._make_raw(name), self._make_space())
+        if n.name:
+            ret.append(self._make_raw(n.name))
         if members is not None:
             # None means no members
             # Empty sequence means an empty list of members
-            s += '\n'
-            s += self._make_indent()
-            self.indent_level += 2
-            s += '{\n'
-            s += body_function(members)
-            self.indent_level -= 2
-            s += self._make_indent() + '}'
-        return s
+            ret.extend([self._make_newline(), self._make_indent()])
+            self.indent_level += 1
+            inner = [self._make_newline()]
+            inner.extend(body_function(members))
+            self.indent_level -= 1
+            inner.append(self._make_indent())
+            ret.extend(self._brace(inner))
+        return ret
 
     def _generate_struct_union_body(self, members):
-        return ''.join(self._generate_stmt(decl) for decl in members)
+        return [self._generate_stmt(decl) for decl in members]
 
     def _generate_enum_body(self, members):
-        # `[:-2] + '\n'` removes the final `,` from the enumerator list
-        return ''.join(self.visit(value) for value in members)[:-2] + '\n'
+        ret = [self.visit(value) for value in members]
+        # remove the final `,` from the enumerator list
+        ret[-1]['value'].pop(-2)
+        return ret
 
     def _generate_stmt(self, n, add_indent=False):
         """ Generation from a statement node. This method exists as a wrapper
@@ -341,9 +455,14 @@ class CGenerator(object):
             some statements in this context.
         """
         typ = type(n)
-        if add_indent: self.indent_level += 2
+        if add_indent: self.indent_level += 1
         indent = self._make_indent()
-        if add_indent: self.indent_level -= 2
+        if add_indent: self.indent_level -= 1
+
+        ret = self.visit(n)
+        if typ in (c_ast.Compound,):
+            return ret
+        ret['value'].insert(0, indent)
 
         if typ in (
                 c_ast.Decl, c_ast.Assignment, c_ast.Cast, c_ast.UnaryOp,
@@ -353,23 +472,21 @@ class CGenerator(object):
             # These can also appear in an expression context so no semicolon
             # is added to them automatically
             #
-            return indent + self.visit(n) + ';\n'
-        elif typ in (c_ast.Compound,):
-            # No extra indentation required before the opening brace of a
-            # compound - because it consists of multiple lines it has to
-            # compute its own indentation.
-            #
-            return self.visit(n)
-        else:
-            return indent + self.visit(n) + '\n'
+            ret['value'].append(self._make_raw(';'))
+        ret['value'].append(self._make_newline())
+        return ret
 
     def _generate_decl(self, n):
         """ Generation from a Decl node.
         """
-        s = ''
-        if n.funcspec: s = ' '.join(n.funcspec) + ' '
-        if n.storage: s += ' '.join(n.storage) + ' '
-        s += self._generate_type(n.type)
+        s = []
+        if n.funcspec:
+            for i in n.funcspec:
+                s.extend([self._make_raw(i), self._make_space])
+        if n.storage:
+            for f in n.storage:
+                s.extend([self._make_raw(f), self._make_space])
+        s.extend(self._generate_type(n.type))
         return s
 
     def _generate_type(self, n, modifiers=[]):
@@ -381,12 +498,24 @@ class CGenerator(object):
         typ = type(n)
         #~ print(n, modifiers)
 
-        if typ == c_ast.TypeDecl:
-            s = ''
-            if n.quals: s += ' '.join(n.quals) + ' '
-            s += self.visit(n.type)
+        ret = []
+        #if n in self.ast_data.node_properties:
+        #    ret.update(self.ast_data.node_properties[n])
 
-            nstr = n.declname if n.declname else ''
+        if typ == c_ast.TypeDecl:
+            if n.quals:
+                for q in n.quals:
+                    ret.extend([self._make_raw(q), self._make_space()])
+            ret.append(self.visit(n.type))
+
+            if n.declname:
+                if n in self.ast_data.node_properties and 'original_name' in self.ast_data.node_properties[n]:
+                    name = self.ast_data.node_properties[n]['original_name']
+                else:
+                    name = n.declname
+            else:
+                name = ''
+            nstr = [self._make_raw(name)]
             # Resolve modifiers.
             # Wrap in parens to distinguish pointer to array and pointer to
             # function syntax.
@@ -394,29 +523,38 @@ class CGenerator(object):
             for i, modifier in enumerate(modifiers):
                 if isinstance(modifier, c_ast.ArrayDecl):
                     if (i != 0 and isinstance(modifiers[i - 1], c_ast.PtrDecl)):
-                        nstr = '(' + nstr + ')'
-                    nstr += '[' + self.visit(modifier.dim) + ']'
+                        self._paren(nstr)
+                    nstr.extend(self._bracket(self.visit(modifier.dim)))
                 elif isinstance(modifier, c_ast.FuncDecl):
                     if (i != 0 and isinstance(modifiers[i - 1], c_ast.PtrDecl)):
-                        nstr = '(' + nstr + ')'
-                    nstr += '(' + self.visit(modifier.args) + ')'
+                        self._paren(nstr)
+                    nstr.extend(self._paren(self.visit(modifier.args)))
                 elif isinstance(modifier, c_ast.PtrDecl):
                     if modifier.quals:
-                        nstr = '* %s %s' % (' '.join(modifier.quals), nstr)
+                        mods = [self._make_raw('*')]
+                        for q in modifier.quals:
+                            mods.extend([self._make_space(), self._make_raw(q)])
+                        nstr = mods + nstr
                     else:
-                        nstr = '*' + nstr
-            if nstr: s += ' ' + nstr
-            return s
+                        nstr.insert(0, self._make_raw('*'))
+            if nstr: nstr.insert(0, self._make_space())
+            ret.extend(nstr)
+            return ret
         elif typ == c_ast.Decl:
-            return self._generate_decl(n.type)
+            ret = self.generate_decl(n.type)
+            return ret
         elif typ == c_ast.Typename:
-            return self._generate_type(n.type)
+            ret.extend(self._generate_type(n.type))
+            return ret
         elif typ == c_ast.IdentifierType:
-            return ' '.join(n.names) + ' '
+            for name in n.names:
+                ret.extend([self._make_raw(name), self._make_space()])
+            return ret
         elif typ in (c_ast.ArrayDecl, c_ast.PtrDecl, c_ast.FuncDecl):
-            return self._generate_type(n.type, modifiers + [n])
+            ret.extend(self._generate_type(n.type, modifiers + [n]))
+            return ret
         else:
-            return self.visit(n)
+            return [self.visit(n)]
 
     def _parenthesize_if(self, n, condition):
         """ Visits 'n' and returns its string representation, parenthesized
@@ -424,9 +562,8 @@ class CGenerator(object):
         """
         s = self._visit_expr(n)
         if condition(n):
-            return '(' + s + ')'
-        else:
-            return s
+            self._paren(s)
+        return s
 
     def _parenthesize_unless_simple(self, n):
         """ Common use case for _parenthesize_if

@@ -4,7 +4,7 @@ from ..my_env.packages.pycparser import c_parser, c_generator, c_lexer
 from ..preprocessor.external import ExternalCPP
 
 from centipyde.interpreter import run_tests
-from .normalize import RemoveDecls, RemoveTypedefs, IDRenamer
+from .normalize import RemoveDecls, RemoveTypedefs, IDRenamer, NodePropertyGenerator
 from .linearize_ast import WrangledAST
 
 def process_linear(tokens, key=None, lexicon=None, lock=None):
@@ -13,11 +13,11 @@ def process_linear(tokens, key=None, lexicon=None, lock=None):
         for token in set(tokens):
             if token not in local_lexicon:
                 with lock:
-                    if token not in lexicon['linear_tokens']:
-                        lexicon['linear_tokens'][token] = 0
-                    lexicon['linear_tokens'][token] += 1
+                    if token not in lexicon['linear']['label']:
+                        lexicon['linear']['label'][token] = 0
+                    lexicon['linear']['label'][token] += 1
                     local_lexicon.add(token)
-    return { 'forward_label': tokens }
+    return { 'label': tokens }
 
 def process_ast(ast, key=None, lexicon=None, lock=None):
     local_lexicon = {
@@ -39,21 +39,27 @@ def process_ast(ast, key=None, lexicon=None, lock=None):
             for j in ['label', 'attr']:
                 if key == "train" and data[j] not in local_lexicon[j]:
                     with lock:
-                        if data[j] not in lexicon['ast_' + j + 's']:
-                            lexicon['ast_' + j + 's'][data[j]] = 0
-                        lexicon['ast_' + j + 's'][data[j]] += 1
+                        if data[j] not in lexicon['ast'][j]:
+                            lexicon['ast'][j][data[j]] = 0
+                        lexicon['ast'][j][data[j]] += 1
                     local_lexicon[j].add(data[j])
 
     new_rows = {}
     for k in ['reverse', 'forward']:
         nodes = ast.nodes[k]
         for i in nodes[0]:
-            if i in ['forward', 'reverse']:
-                if i != k: continue
+            if i == k:
                 for j in nodes[0][i]:
-                    new_rows[k + '_' + j] = [int(n[i][j]) if isinstance(n[i][j], bool) else n[i][j] for n in nodes]
-            else:
-                new_rows[k + '_' + i] = [int(n[i]) if isinstance(n[i], bool) else n[i] for n in nodes]
+                    if j == 'pointers':
+                        for q in range(len(nodes[0][i][j]['memory'])):
+                            # TODO: use sequence example instead or something?
+                            new_rows['-'.join([k,j,'memory',str(q)])] = [n[i][j]['memory'][q] for n in nodes]
+                            new_rows['-'.join([k,j,'mask',str(q)])] = [n[i][j]['mask'][q] for n in nodes]
+                    else:
+                        new_rows['-'.join([k,j])] = [int(n[i][j]) if isinstance(n[i][j], bool) else n[i][j] for n in nodes]
+            elif i in ['forward', 'reverse']: continue
+            elif i not in ['node_num', 'visited', 'pointers']:
+                new_rows[i] = [int(n[i]) if isinstance(n[i], bool) else n[i] for n in nodes]
     return new_rows
 
 def tokens_to_ids(tokens, token_to_id, include_token):
@@ -72,33 +78,34 @@ def tokens_to_ids(tokens, token_to_id, include_token):
 
 def finish_row(row, lexicon, features=None):
     # all rows should have a forward label
-    row_len = len(row['forward_label'])
+    row_len = len(row['label'])
 
-    for i in ['forward_', 'reverse_']:
-        for j in ['parent_', '']:
-            for k in ['label', 'attr']:
-                idx = i + j + k
-                if idx in row:
-                    row[idx + '_index'] = tokens_to_ids(row[idx], lexicon[k], False)
-                    del(row[idx])
-                else:
-                    row[idx + '_index'] = [0] * row_len
+    for i in ['parent_', '']:
+        for j in ['label', 'attr']:
+            idx = i + j
+            if idx in row:
+                row[idx + '_index'] = tokens_to_ids(row[idx], lexicon[j], False)
+                del(row[idx])
+            else:
+                row[idx + '_index'] = [0] * row_len
 
     # this must be a linear model
     if features is not None:
-        row['forward_left_sibling'] = list(range(row_len))
-        row['forward_right_sibling'] = list(range(2, row_len+1)) + [0]
+        row.update({
+            'forward-left_sibling': list(range(row_len)),
+            'forward-right_sibling': list(range(2, row_len+1)) + [0]
+        })
         for key in features:
             if key not in row:
                 row[key] = [0] * row_len
 
     # the nil slot is the only slot that's masked out, other than potential padded batches
-    row['forward_mask'] = [1] * row_len
-    row['reverse_mask'] = [1] * row_len
+    row['forward-mask'] = [1] * row_len
+    row['reverse-mask'] = [1] * row_len
 
     # insert the nil slot
-    for k in row:
-        row[k] = [0] + row[k]
+    for i in row:
+        row[i] = [0] + row[i]
     return row
 
 def lex_code(code : str) -> List[str]:
@@ -127,17 +134,16 @@ def lex_code(code : str) -> List[str]:
 def wrangle(code : str, include_dependencies : bool = True, is_file=True, tests=None) -> Tuple[WrangledAST, List[str]] :
     # these can raise exceptions that we'll let pass through
     cfile = ExternalCPP().preprocess(code, is_file)
-    orig_ast = c_parser.CParser().parse(cfile)
-    results, visited = run_tests(orig_ast, tests) if tests is not None else None, None
+    ast = c_parser.CParser().parse(cfile)
+    results, visited = run_tests(ast, tests) if tests is not None else (None, None)
 
-    #ast = RemoveDecls().visit(orig_ast)
-    ast = RemoveTypedefs().visit(orig_ast)
-    renamer = IDRenamer()
-    ast = renamer.visit(ast)
-    name_map = renamer.node_name_map
+    node_properties = NodePropertyGenerator().visit(ast)
+    ast = RemoveTypedefs(node_properties).visit(ast)
+    ast = RemoveDecls(node_properties).visit(ast)
+    ast = IDRenamer(node_properties).visit(ast)
 
     linear_data = lex_code(c_generator.CGenerator().visit(ast))
-    ast_data = WrangledAST(ast, orig_ast, name_map, results, visited, include_dependencies)
+    ast_data = WrangledAST(ast, node_properties, results, visited, include_dependencies)
 
     return ast_data, linear_data
 

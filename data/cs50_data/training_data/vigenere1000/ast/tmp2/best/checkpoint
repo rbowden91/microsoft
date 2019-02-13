@@ -1,0 +1,3 @@
+model_checkpoint_path: "/home/rbowden/repos/repair50/data/cs50_data/training_data/vigenere1000/ast/tmp2/best/model"
+all_model_checkpoint_paths: "/home/rbowden/repos/repair50/data/cs50_data/training_data/vigenere1000/ast/tmp2/checkpoints/model"
+all_model_checkpoint_paths: "/home/rbowden/repos/repair50/data/cs50_data/training_data/vigenere1000/ast/tmp2/best/model"

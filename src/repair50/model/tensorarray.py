@@ -126,8 +126,8 @@ class RNNTensorArrayCell():
                 if is_tree:
                     return TreeLSTMCell(size, data_type=self.data_type)
                 else:
-                    return tf.contrib.rnn.BasicLSTMCell(
-                        self.array.hidden_size, forget_bias=0.0, state_is_tuple=True)
+                    return tf.nn.rnn_cell.LSTMCell(
+                        self.array.hidden_size, forget_bias=0.0, state_is_tuple=True, name='basic_lstm_cell')
                     #return tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(size, reuse=tf.get_variable_scope().reuse)
             #return tf.contrib.rnn.DropoutWrapper(lstm_cell(is_tree),
             #                                        output_keep_prob=(1 - self.placeholders['drop_prob']))

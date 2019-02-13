@@ -8,7 +8,6 @@ import tensorflow as tf
 from ..model.config import joint_configs, dependency_configs
 from ..wrangler import finish_row, wrangle, process_ast
 from .c_generator import CGenerator
-from ..interpreter import Interpreter
 
 #import check_correct
 #import queue as Q
@@ -82,29 +81,6 @@ from ..interpreter import Interpreter
 #            return code
 #    return False
 
-def print_ast(ast, node_properties):
-
-    # TODO: is this possible anymore, given how we're doing normalizations???
-    if ast not in node_properties:
-        return False
-
-    output = {
-        "children": []
-    }
-    props = node_properties[ast]
-    for k in props:
-        if k in ['self', 'dependencies', 'cells']:
-            continue
-
-        output[k] = props[k]
-
-    children = ast.children()
-    for i in range(len(children)):
-        ret = print_ast(children[i][1], node_properties)
-        if ret is not False:
-            output['children'].append(ret)
-    return output
-
 def feed_dict_filler(feed_dict, dependency, initial_names, initial_values):
     if isinstance(initial_names, dict):
         for k in initial_names:
@@ -125,10 +101,6 @@ class Server(object):
         with open(os.path.join(best_dir, 'config.json')) as f:
             self.config = json.load(f)
         self.config['best_dir'] = best_dir
-
-        # TODO: include this in the config automatically
-        self.config['test_name'] = 'vigenere'
-        self.interpreter = Interpreter(self.config['test_name'])
 
         # we have to find the model that we can feed...
         self.config['fetches'] = fetches = {} # type: ignore
@@ -388,11 +360,12 @@ class Server(object):
 
 
     def process_code(self, code):
+        ast_data, linear_data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         try:
-            ast_data, linear_data = wrangle(code, self.config['test_name'], is_file=False)
-        except:
+            ast_data, linear_data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
+        except Exception as e:
             # TODO
-            return {'error': "Couldn't parse code."}
+            return {'error': "Couldn't parse code." + str(e)}
 
         self.infer(ast_data, linear_data)
         #for i in range(len(ast_data.visited)):
@@ -401,8 +374,7 @@ class Server(object):
 
         if self.config['model'] == 'ast':
             output = {
-                'ast': print_ast(ast_data.ast, ast_data.node_properties),
-                'code': CGenerator(ast_data).visit(ast_data.orig_ast),
+                'code': CGenerator(ast_data).visit(ast_data.ast),
                 'test_results': ast_data.results,
                 #'visited': ast_data.visited
             }

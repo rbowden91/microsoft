@@ -20,6 +20,7 @@ dependency_configs = {
         # should never need to have a dependency appear twice in the list
         'left_sibling': [('top', 'left', ['left_sibling'])],
         'children': [('bottom', 'right', ['children'])],
+        'right_sibling': [('bottom', 'right', ['right_sibling'])],
         'parent': [('top', 'left', ['parent'])],
         'd1': [('bottom', 'right', ['children', 'right_sibling'])],
         'd2': [('top', 'left', ['parent', 'left_sibling'])],

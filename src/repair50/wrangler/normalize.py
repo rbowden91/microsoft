@@ -11,7 +11,28 @@ no_replace = set(['main', 'argc', 'argv', 'int', 'char', 'signed char', 'unsigne
 
 typedefs = { "size_t":"typedef int", "__builtin_va_list":"typedef int", "__gnuc_va_list":"typedef int", "__int8_t":"typedef int", "__uint8_t":"typedef int", "__int16_t":"typedef int", "__uint16_t":"typedef int", "__int_least16_t":"typedef int", "__uint_least16_t":"typedef int", "__int32_t":"typedef int", "__uint32_t":"typedef int", "__int64_t":"typedef int", "__uint64_t":"typedef int", "__int_least32_t":"typedef int", "__uint_least32_t":"typedef int", "__s8":"typedef int", "__u8":"typedef int", "__s16":"typedef int", "__u16":"typedef int", "__s32":"typedef int", "__u32":"typedef int", "__s64":"typedef int", "__u64":"typedef int", "_LOCK_T":"typedef int", "_LOCK_RECURSIVE_T":"typedef int", "_off_t":"typedef int", "__dev_t":"typedef int", "__uid_t":"typedef int", "__gid_t":"typedef int", "_off64_t":"typedef int", "_fpos_t":"typedef int", "_ssize_t":"typedef int", "wint_t":"typedef int", "_mbstate_t":"typedef int", "_flock_t":"typedef int", "_iconv_t":"typedef int", "__ULong":"typedef int", "__FILE":"typedef int", "ptrdiff_t":"typedef int", "wchar_t":"typedef int", "__off_t":"typedef int", "__pid_t":"typedef int", "__loff_t":"typedef int", "u_char":"typedef int", "u_short":"typedef int", "u_int":"typedef int", "u_long":"typedef int", "ushort":"typedef int", "uint":"typedef int", "clock_t":"typedef int", "time_t":"typedef int", "daddr_t":"typedef int", "caddr_t":"typedef int", "ino_t":"typedef int", "off_t":"typedef int", "dev_t":"typedef int", "uid_t":"typedef int", "gid_t":"typedef int", "pid_t":"typedef int", "key_t":"typedef int", "ssize_t":"typedef int", "mode_t":"typedef int", "nlink_t":"typedef int", "fd_mask":"typedef int", "_types_fd_set":"typedef int", "clockid_t":"typedef int", "timer_t":"typedef int", "useconds_t":"typedef int", "suseconds_t":"typedef int", "FILE":"typedef int", "fpos_t":"typedef int", "cookie_read_function_t":"typedef int", "cookie_write_function_t":"typedef int", "cookie_seek_function_t":"typedef int", "cookie_close_function_t":"typedef int", "cookie_io_functions_t":"typedef int", "div_t":"typedef int", "ldiv_t":"typedef int", "lldiv_t":"typedef int", "sigset_t":"typedef int", "__sigset_t":"typedef int", "_sig_func_ptr":"typedef int", "sig_atomic_t":"typedef int", "__tzrule_type":"typedef int", "__tzinfo_type":"typedef int", "mbstate_t":"typedef int", "sem_t":"typedef int", "pthread_t":"typedef int", "pthread_attr_t":"typedef int", "pthread_mutex_t":"typedef int", "pthread_mutexattr_t":"typedef int", "pthread_cond_t":"typedef int", "pthread_condattr_t":"typedef int", "pthread_key_t":"typedef int", "pthread_once_t":"typedef int", "pthread_rwlock_t":"typedef int", "pthread_rwlockattr_t":"typedef int", "pthread_spinlock_t":"typedef int", "pthread_barrier_t":"typedef int", "pthread_barrierattr_t":"typedef int", "jmp_buf":"typedef int", "rlim_t":"typedef int", "sa_family_t":"typedef int", "sigjmp_buf":"typedef int", "stack_t":"typedef int", "siginfo_t":"typedef int", "z_stream":"typedef int", "int8_t":"typedef int", "uint8_t":"typedef int", "int16_t":"typedef int", "uint16_t":"typedef int", "int32_t":"typedef int", "uint32_t":"typedef int", "int64_t":"typedef int", "uint64_t":"typedef int", "int_least8_t":"typedef int", "uint_least8_t":"typedef int", "int_least16_t":"typedef int", "uint_least16_t":"typedef int", "int_least32_t":"typedef int", "uint_least32_t":"typedef int", "int_least64_t":"typedef int", "uint_least64_t":"typedef int", "int_fast8_t":"typedef int", "uint_fast8_t":"typedef int", "int_fast16_t":"typedef int", "uint_fast16_t":"typedef int", "int_fast32_t":"typedef int", "uint_fast32_t":"typedef int", "int_fast64_t":"typedef int", "uint_fast64_t":"typedef int", "intptr_t":"typedef int", "uintptr_t":"typedef int", "intmax_t":"typedef int", "uintmax_t":"typedef int", "bool":"typedef _Bool", "va_list":"typedef int", "Display":"typedef struct Display", "XID":"typedef unsigned long", "VisualID":"typedef unsigned long", "Window":"typedef XID", "MirEGLNativeWindowType":"typedef void *", "MirEGLNativeDisplayType":"typedef void*", "MirConnection":"typedef struct MirConnection", "MirSurface":"typedef struct MirSurface", "MirSurfaceSpec":"typedef struct MirSurfaceSpec", "MirScreencast":"typedef struct MirScreencast", "MirPromptSession":"typedef struct MirPromptSession", "MirBufferStream":"typedef struct MirBufferStream", "MirPersistentId":"typedef struct MirPersistentId", "MirBlob":"typedef struct MirBlob", "MirDisplayConfig":"typedef struct MirDisplayConfig", "xcb_connection_t":"typedef struct xcb_connection_t", "xcb_window_t":"typedef uint32_t", "xcb_visualid_t":"typedef uint32_t", "string":"typedef char *" }
 
-class RemoveTypedefs(c_ast.NodeVisitor):
+class NodePropertyVisitor(c_ast.NodeVisitor):
+    def __init__(self, node_properties, *args, **kwargs):
+        super(NodePropertyVisitor, self).__init__(*args, **kwargs)
+        self.node_properties = node_properties
+
+class NodePropertyGenerator(NodePropertyVisitor):
+    def __init__(self, *args, **kwargs):
+        super(NodePropertyGenerator, self).__init__({}, *args, **kwargs)
+
+        self.node_num = 1
+
+    def generic_visit(self, n):
+        self.node_properties[n] = {
+            'node_num': self.node_num,
+            'visited': {}
+        }
+        self.node_num += 1
+        for c_name, c in n.children():
+            self.visit(c)
+        return self.node_properties
+
+class RemoveTypedefs(NodePropertyVisitor):
     def visit_Typedef(self, node):
         return node if node.name not in typedefs else None
 
@@ -41,23 +62,11 @@ class RemoveTypedefs(c_ast.NodeVisitor):
                 setattr(node, name, c_names[name]['list'])
         return node
 
-class RemoveDecls(c_ast.NodeVisitor):
+class RemoveDecls(NodePropertyVisitor):
     def generic_visit(self, node):
         #print(node.__class__.__name__)
         for c_name, c in node.children():
             self.visit(c)
-        return node
-
-    def visit_Compound(self, node):
-        if node.block_items is None:
-            # handle empty blocks
-            return node
-        items = []
-        for item in node.block_items:
-            ret = self.visit(item)
-            if ret is not None:
-                items.append(ret)
-        node.block_items = items
         return node
 
     def visit_FuncDef(self, node):
@@ -73,11 +82,14 @@ class RemoveDecls(c_ast.NodeVisitor):
     # move decls out of for loops?
     # at that point, make all for loops while loops?
 
+    def visit_TypeDecl(self, node):
+        self.node_properties[node]['removed'] = True
+        return node
+
     def visit_Decl(self, node):
-        if node.init is not None:
-            return c_ast.Assignment('=', c_ast.ID(node.name), node.init)
-        else:
-            return None
+        if node.init is None:
+            self.node_properties[node]['removed'] = True
+        return node
 
 
 # list of typedefs from common header files that we don't want to output
@@ -181,7 +193,7 @@ class IDRenamer(c_ast.NodeVisitor):
     def __init__(self, node_properties, *args, **kwargs):
         super(IDRenamer, self).__init__(*args, **kwargs)
 
-        self.node_properties = {}
+        self.node_properties = node_properties
 
         self.id_map = {}
         self.reverse_id_map = {}
@@ -211,8 +223,6 @@ class IDRenamer(c_ast.NodeVisitor):
         self.visiting_decl = False
 
     def save_id(self, n, node, context=None):
-        if node not in self.node_properties:
-            self.node_properties[node]['original_name'] = node
         if n in no_replace or n in typedefs.keys():
             return n
         # XXX don't want to rename something like "struct tmp tmp" to "struct STRUCT_ID1 STRUCT_ID1"
@@ -225,11 +235,17 @@ class IDRenamer(c_ast.NodeVisitor):
                 self.used_reverse_local_maps[-1][name] = n
             elif self.visiting_decl:
                 self.decl_now = n
+            self.reverse_local_maps[-1][n].add(node)
+            self.node_properties[node]['replace_name'] = name
+            self.node_properties[node]['pointers'] = self.reverse_local_maps[-1][n]
             return name
         elif n in self.id_map:
+            self.reverse_id_map[n].add(node)
+            self.node_properties[node]['replace_name'] = self.id_map[n]
             return self.id_map[n]
         # a function call that didn't come from a funcdef or funcdecl is presumably a library function
         elif self.visiting_funccall:
+            self.node_properties[node]['replace_name'] = n
             return n
 
         if self.visiting_struct_members:
@@ -266,12 +282,15 @@ class IDRenamer(c_ast.NodeVisitor):
                     break
             else: assert False
 
+        self.node_properties[node]['replace_name'] = name
         if context == 'local' or context == 'arg':
             self.local_maps[-1][n] = name# + '___' + n
-            self.reverse_local_maps[-1][name] = n
+            self.reverse_local_maps[-1][n] = set(node)
+            self.node_properties[node]['pointers'] = self.reverse_local_maps[-1][n]
         else:
             self.id_map[n] = name# + '___' + n
-            self.reverse_id_map[name] = n
+            self.reverse_id_map[n] = set(node)
+            self.node_properties[node]['pointers'] = self.reverse_id_map[n]
         return name
 
     def push_scope(self):
@@ -311,21 +330,21 @@ class IDRenamer(c_ast.NodeVisitor):
         return n
 
     def visit_Enum(self, n):
-        n.name = self.save_id(n.name, n, context='enum')
+        self.save_id(n.name, n, context='enum')
         self.visiting_enum = n.name
         self.visit(n.values)
         self.visiting_enum = False
         return n
 
     def visit_Struct(self, n):
-        n.name = self.save_id(n.name, n, context='struct')
+        self.save_id(n.name, n, context='struct')
         self.visiting_struct_members = n.name
         if n.decls: [self.visit(decl) for decl in n.decls]
         self.visiting_struct_members = False
         return n
 
     def visit_Union(self, n):
-        n.name = self.save_id(n.name, n, context='union')
+        self.save_id(n.name, n, context='union')
         self.visiting_union_members = n.name
         if n.decls: [self.visit(decl) for decl in n.decls]
         self.visiting_union_members = False
@@ -333,24 +352,24 @@ class IDRenamer(c_ast.NodeVisitor):
 
 
     def visit_Enumerator(self, n):
-        n.name = self.save_id(n.name, n, context='enum_val')
+        self.save_id(n.name, n, context='enum_val')
         if n.value: self.visit(n.value)
         return n
 
     def visit_Label(self, n):
-        n.name = self.save_id(n.name, n, context='label')
+        self.save_id(n.name, n, context='label')
         self.visit(n.stmt)
         return n
 
     def visit_Goto(self, n):
-        n.name = self.save_id(n.name, n, context='label')
+        self.save_id(n.name, n, context='label')
         return n
 
     def visit_Constant(self, n):
         return n
 
     def visit_ID(self, n):
-        n.name = self.save_id(n.name, n)
+        self.save_id(n.name, n)
         return n
 
     def visit_FuncCall(self, n):
@@ -364,7 +383,7 @@ class IDRenamer(c_ast.NodeVisitor):
         self.visit(n.type)
         self.visiting_decl = True
         # TODO: get type from n.type
-        n.name = self.save_id(n.name, n)
+        self.save_id(n.name, n)
         self.visiting_decl = False
         if n.init: self.visit(n.init)
         # only add the new declaration after the assignment completes (for something like "int x = x * 2")
@@ -423,20 +442,20 @@ class IDRenamer(c_ast.NodeVisitor):
 
     def visit_Typedef(self, n):
         self.visiting_typedef = True
-        n.name = self.save_id(n.name, n, context='type')
+        self.save_id(n.name, n, context='type')
         self.visit(n.type)
         self.visiting_typedef = False
         return n
 
     # when is this used??
     def visit_TypeDecl(self, n):
-        n.declname = self.save_id(n.declname, n, context='type')
+        self.save_id(n.declname, n, context='type')
         self.visit(n.type)
         return n
 
     # similarly, when is this used??
     def visit_Typename(self, n):
-        n.name = self.save_id(n.name, n, context='type')
+        self.save_id(n.name, n, context='type')
         self.visit(n.type)
         return n
 
