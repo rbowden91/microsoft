@@ -1,17 +1,19 @@
-from ..my_env.typing import NamedTuple
+from typing import NamedTuple
 
 valid_dependencies = {
     'children': 'bottom',
     'parent': 'top',
     'left_prior': 'left',
-    'left_child': 'left',
     'left_sibling': 'left',
     'right_prior': 'right',
-    'right_child': 'right',
     'right_sibling': 'right',
 
-    # FIXME
-    'right_hole': 'left'
+    'right_hole': 'right',
+    'left_hole': 'left',
+
+    # TODO: these could technically be either left or right?
+    'left_child': 'left',
+    'right_child': 'right',
 }
 
 # 'top/bottom' and 'left/right' end up replaced by 'True/False'
@@ -26,7 +28,11 @@ dependency_configs = {
         'd2': [('top', 'left', ['parent', 'left_sibling'])],
         'd3': [('top', 'right', ['parent', 'right_sibling'])],
         # TODO: validate that it makes sense to traverse in this order?
-        'd4': [('bottom', 'left', ['children']), ('top', 'left', ['parent', 'left_sibling', 'right_hole'])],
+        # TODO: dependency configs in "server" should not read from this
+        'd4': [('bottom', 'left', ['children']), ('top', 'left', ['parent', 'left_sibling', 'left_hole'])],
+        'd5': [('bottom', 'right', ['children']), ('top', 'right', ['parent', 'right_sibling', 'right_hole'])],
+        'd6': [('top', 'left', ['parent', 'left_sibling', 'left_prior'])],
+        'd7': [('top', 'right', ['parent', 'right_sibling', 'right_prior'])],
         #'d3': [('bottom_right', [
         #{ 'bottom_right': [['children'], ['right_children'],
         #                   ['children', 'initial_right_children']]},

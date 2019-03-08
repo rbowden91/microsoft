@@ -1,5 +1,5 @@
-from ..my_env.abc import ABCMeta, abstractmethod
-from ..my_env.typing import List
+from abc import ABCMeta, abstractmethod
+from typing import List
 
 class PreprocessorException(Exception): pass
 

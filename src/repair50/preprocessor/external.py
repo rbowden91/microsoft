@@ -1,6 +1,5 @@
-#from ..my_env.typing import List
-from ..my_env import os, subprocess
-from ..my_env.typing import Dict, List
+import os, subprocess
+from typing import Dict, List
 
 from .preprocessor import Preprocessor, PreprocessorException
 

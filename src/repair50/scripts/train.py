@@ -19,7 +19,15 @@ import numpy as np
 import tensorflow as tf
 from ..model.model import TRNNModel, TRNNJointModel
 
-from .train_config import *
+#LargeConfig = TrainConfig(
+#  init_scale = 0.04,
+#  max_grad_norm = 10,
+#  num_layers = 2,
+#  hidden_size = 1500,
+#  epochs = 55,
+#  drop_prob = 0.35,
+#  batch_size = 20,
+#)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-f', '--force', help='blows away the current save directory', action='store_true')
@@ -27,31 +35,27 @@ parser.add_argument('-m', '--model', help='linear or ast (default "linear")', de
 parser.add_argument('-s', '--save_path', help='model output directory (default "tmp")', default='tmp')
 parser.add_argument('-p', '--data_path', help='directory to find preprocessed data (default "./data/vig10000")', default='./data/vig10000')
 parser.add_argument('-b', '--batch_size', help='batch size', type=int)
-parser.add_argument('-c', '--config', help='test/small/medium/large, (default "small")', default='small')
 parser.add_argument('-n', '--num_files', help='number of files to train on (default, all files)', type=int)
 parser.add_argument('-d', '--dependency_configs', help='forward/reverse, etc.', type=lambda s: s.split())
 parser.add_argument('-j', '--joint_configs', help='both, etc.', type=lambda s: s.split(), default=[])
 parser.add_argument('-e', '--epochs', help='how many epochs', type=int)
 parser.add_argument('-w', '--summarywriter', help='turns on summary writer', action='store_true')
+parser.add_argument('-c', '--cpu', help='don\'t use gpu', action='store_true')
 #parser.add_argument('--profile', help='enable graph profiling (default false)', action="store_true")
 parser.add_argument('--checkpoint', help='attempts to resume training from a checkpoint file (default false)', action="store_true")
+parser.add_argument('--init_scale', help='', type=float, default=0.1)
+parser.add_argument('--max_grad_norm', help='', type=int, default=5)
+parser.add_argument('--num_layers', help='', type=int, default=2)
+parser.add_argument('--hidden_size', help='', type=int, default=400)
+parser.add_argument('--drop_prob', help='', type=float, default=1.0)
+#"learning_rate" : 1.0,
+#"max_epoch" : 4,
+#"max_max_epoch" : 4,
+#"lr_decay" : 0.5,
 
 args = parser.parse_args()
 
 logging = tf.logging
-
-def get_config():
-    if args.config == "small":
-        return SmallConfig
-    elif args.config == "medium":
-        return MediumConfig
-    elif args.config == "large":
-        return LargeConfig
-    elif args.config == "test":
-        return TestConfig
-    else:
-        raise ValueError("Invalid size: %s", args.config)
-
 
 class Trainer(object):
 
@@ -110,8 +114,8 @@ class Trainer(object):
             #    self.run_profiler()
 
             if verbose:
-                print("\n%.02f%%:\tspeed: %.03f fps" %
-                    ((epoch_step + 1) * 100.0 / self.epoch_size, (epoch_step + 1) * self.batch_size /
+                print("\nepoch %d %.02f%%:\tspeed: %.03f fps" %
+                    (self.epoch + 1, (epoch_step + 1) * 100.0 / self.epoch_size, (epoch_step + 1) * self.batch_size /
                                                             (time.time() - start_time)))
             for d in vals:
                 if d not in total_loss: total_loss[d] = {}
@@ -190,7 +194,8 @@ class Trainer(object):
             # save stuff to be used later in inference
             self.saver = tf.train.Saver()
 
-            with tf.Session() as session:
+            sess_config = tf.ConfigProto(device_count = {'GPU': (0 if args.cpu else 1)})
+            with tf.Session(config=sess_config) as session:
                 self.session = session
 
 
@@ -289,10 +294,7 @@ def main():
             config['num_files'] = min(args.num_files, config['num_files'])
         del(args.num_files)
 
-        # TODO: fix this
-        train_config = get_config()
-        for i in train_config._fields:
-            config[i] = getattr(train_config, i)
+        token_ids = token_ids['null']
         config.update(vars(args))
         config['label_size'] = len(token_ids['label'])
         config['attr_size'] = len(token_ids['attr'])

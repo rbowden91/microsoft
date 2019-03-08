@@ -1,13 +1,18 @@
-from ..my_env import sys
-from ..my_env import os
-from ..my_env import json
-from ..my_env.typing import Dict, Union
-from ..my_env.packages import numpy as np
-import tensorflow as tf
+import sys
+import os
+import json
+from typing import Dict, Union
 
-from ..model.config import joint_configs, dependency_configs
-from ..wrangler import finish_row, wrangle, process_ast
+import numpy as np # type:ignore
+import tensorflow as tf #type:ignore
+import collections
+
+from ..model.config import joint_configs, dependency_configs, valid_dependencies #type:ignore
+from ..wrangler import finish_row, wrangle, process_ast #type:ignore
 from .c_generator import CGenerator
+
+nested_dict = lambda: collections.defaultdict(nested_dict) #type:ignore
+
 
 #import check_correct
 #import queue as Q
@@ -81,21 +86,10 @@ from .c_generator import CGenerator
 #            return code
 #    return False
 
-def feed_dict_filler(feed_dict, dependency, initial_names, initial_values):
-    if isinstance(initial_names, dict):
-        for k in initial_names:
-            feed_dict_filler(feed_dict, dependency[k] if dependency is not None else None,
-                             initial_names[k], initial_values[k])
-    elif isinstance(initial_names, list):
-        for k in range(len(initial_names)):
-            feed_dict_filler(feed_dict, dependency[k] if dependency is not None else None,
-                             initial_names[k], initial_values[k])
-    else:
-        feed_dict[initial_names] = dependency if dependency is not None else initial_values
-
 class Server(object):
 
     # TODO: close self.session in Server deconstructor?
+    # TODO: pass in the config directly instead of data_path
     def __init__(self, data_path) -> None:
         best_dir = os.path.join(data_path, 'best')
         with open(os.path.join(best_dir, 'config.json')) as f:
@@ -105,16 +99,15 @@ class Server(object):
         # we have to find the model that we can feed...
         self.config['fetches'] = fetches = {} # type: ignore
         self.config['initials'] = initials = {} # type: ignore
-        self.config['feed_dict'] = feed = {} # type: ignore
+        #self.config['feed_dict'] = feed = {} # type: ignore
         for d in self.config['models']:
             fetches[d] = {}
             initials[d] = {}
             for i in self.config['models'][d]:
                 #feed[self.config['models'][d][i]['placeholders']['is_inference']] = False
                 fetches[d][i] = self.config['models'][d][i]['fetches']
-                initials[d][i] = {}
-                for j in self.config['models'][d][i]['initials']:
-                    initials[d][i][j] = self.config['models'][d][i]['initials'][j]
+                initials[d][i] = self.config['models'][d][i]['initials']
+
                 for j in self.config['models'][d][i]['placeholders']:
                     if 'features' == j:
                         self.config['features'] = self.config['models'][d][i]['placeholders'][j]
@@ -122,263 +115,265 @@ class Server(object):
 
         if 'features' not in self.config:
             print('yikes')
-            sys.exit(0)
+            return
 
         # fix windows path separators TODO: this isn't particularly portable?
         self.config['data_path'] = os.path.join(*self.config['data_path'].split('\\'))
 
-        raw_data = dict()
-        # TODO: this data path is hard-coded
-        with open(os.path.join('..', self.config['data_path'], self.config['model'] + '_lexicon.json')) as f:
+        with open(os.path.join(self.config['data_path'], self.config['model'] + '_lexicon.json')) as f:
             token_ids = json.load(f)
-        raw_data['label'] = token_ids['label']
-        raw_data['attr'] = token_ids['attr']
+        token_ids[None] = token_ids['null']
+        del(token_ids['null'])
 
-        raw_data['label_index_to_token'] = dict()
-        for k in raw_data['label']:
-            raw_data['label_index_to_token'][raw_data['label'][k]] = k
 
-        raw_data['attr_index_to_token'] = dict()
-        for k in raw_data['attr']:
-            raw_data['attr_index_to_token'][raw_data['attr'][k]] = k
-        self.config['raw_data'] = raw_data
+        for test in token_ids:
+            for k in list(token_ids[test].keys()):
+                token_ids[test][k + '_index_to_token'] = {}
+                for token in token_ids[test][k]:
+                    token_ids[test][k + '_index_to_token'][token_ids[test][k][token]] = token
+        self.config['lexicon'] = token_ids
 
         self.graph = tf.Graph()
         with self.graph.as_default():
             saver = tf.train.import_meta_graph(os.path.join(self.config['best_dir'], "model.meta"))
-            self.session = tf.Session()
+            self.session = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 0}))
             saver.restore(self.session, os.path.join(self.config['best_dir'], 'model'))
-            self.config['initial_values'] = self.session.run(self.config['initials'])
 
-
-    #def subtree(self, dependencies):
-
-    #    # TODO: clean this up. really, it's three steps. first, we need to find the label index. then attr_index. then, we need
-    #    # to calculate the state and output given that index
-
-    #    # TODO: can we get rid of this if all we fetch are probabilities?
-    #    data_dict = {}
-    #    for k in config['features']:
-    #        data_dict[config['features'][k]] = [[0, 0]]
-    #    session.run(config['tensor_iter'], data_dict)
-
-    #    feed_dict = config['feed_dict'].copy()
-    #    feed_dict_filler(feed_dict, dependencies, config['initials'], config['initial_values'])
-    #    vals = session.run(config['fetches'], feed_dict)
-
-    #    props = { 'children': [], 'cells': {} }
-
-    #    # TODO: this should use a specific direction, but also check if things are fine coming from the
-    #    # other directions?
-    #    for dconfig in vals:
-    #        for dependency in vals[dconfig]:
-    #            probs = vals[dconfig][dependency]['probabilities']['label_index'][0][1]
-    #            rank = np.flip(np.argsort(probs), 0)
-    #            props['label_index'] = {}
-    #            props['label_index']['expected'] = raw_data['label_index_to_token'][rank[0]]
-    #            props['label_index']['expected_index'] = rank[0]
-    #            props['label_index']['expected_probability'] = float(probs[rank[0]])
-    #            props['label_index']['probabilities'] = [(float(probs[j]), raw_data['label_index_to_token'][j]) for j in rank]
-
-    #    data_dict = {}
-    #    for k in config['features']:
-    #        val = props[k]['expected_index'] if k in ['label_index'] else 0
-    #        data_dict[config['features'][k]] = [[0, val]]
-    #    session.run(config['tensor_iter'], data_dict)
-    #    vals = session.run(config['fetches'], feed_dict)
-
-    #    for dconfig in vals:
-    #        for dependency in vals[dconfig]:
-    #            probs = vals[dconfig][dependency]['probabilities']['attr_index'][0][1]
-    #            rank = np.flip(np.argsort(probs), 0)
-    #            props['attr_index'] = {}
-    #            props['attr_index']['expected'] = raw_data['attr_index_to_token'][rank[0]]
-    #            props['attr_index']['expected_index'] = rank[0]
-    #            props['attr_index']['expected_probability'] = float(probs[rank[0]])
-    #            props['attr_index']['probabilities'] = [(float(probs[j]), raw_data['attr_index_to_token'][j]) for j in rank]
-
-    #    data_dict = {}
-    #    for k in config['features']:
-    #        val = props[k]['expected_index'] if k in ['label_index', 'attr_index'] else 0
-    #        data_dict[config['features'][k]] = [[0, val]]
-    #    session.run(config['tensor_iter'], data_dict)
-    #    vals = session.run(config['fetches'], feed_dict)
-
-    #    for dconfig in vals:
-    #        props['cells'][dconfig] = {}
-    #        for dependency in vals[dconfig]:
-    #            props['cells'][dconfig][dependency] = prop = {}
-    #            for k in vals[dconfig][dependency]['cells']:
-    #                prop[k] = {
-    #                    'output': [vals[dconfig][dependency]['cells'][k]['output'][0][1]],
-    #                    'states': []
-    #                }
-    #                for layer in range(config['num_layers']):
-    #                    prop[k]['states'].append({
-    #                        'c': [vals[dconfig][dependency]['cells'][k]['states'][layer]['c'][0][1]],
-    #                        'h': [vals[dconfig][dependency]['cells'][k]['states'][layer]['h'][0][1]]
-    #                    })
-    #            for k in vals[dconfig][dependency]['probabilities']:
-    #                probs = vals[dconfig][dependency]['probabilities'][k][0][1]
-    #                rank = np.flip(np.argsort(probs), 0)
-    #                if k not in ['label_index', 'attr_index']:
-    #                    props[k] = {'expected': float(probs)}
-
-
-    #    # TODO: return can also fit here, but only if type is void
-    #    # TODO: gather these from code rather than hard-coding
-    #    print(props['label_index']['expected'], props['attr_index']['expected'], props['label_index']['expected_probability'])
-    #    if props['label_index']['expected'] not in ['Break', 'Continue', 'ID', 'Constant', 'IdentifierType']:
-    #        while True:
-    #            child_dependencies = {}
-    #            for dconfig in vals:
-    #                child_dependencies[dconfig] = {}
-    #                for dependency in vals[dconfig]:
-    #                    child_dependencies[dconfig][dependency] = {
-    #                        'parent': props['cells'][dconfig][dependency]['parent'],
-    #                        'left_sibling': props['children'][-1]['cells'][dconfig][dependency]['left_sibling'] \
-    #                                        if len(props['children']) > 0 else None
-    #                    }
-    #            print('down')
-    #            child_props = subtree(session, config, raw_data, child_dependencies)
-    #            print('up')
-    #            props['children'].append(child_props)
-    #            if child_props['last_sibling']['expected'] > 0.5:
-    #                break
-
-    #    return props
-
-
-    #def step(self, tokens, raw_data, node_properties=None):
-
-    #    token = tokens[2]
-
-    #    dependencies = {}
-
-    #    feed_dict = config['feed_dict'].copy()
-    #    for dconfig in config['initials']:
-    #        dependencies[dconfig] = {}
-    #        for dependency in config['initials'][dconfig]:
-    #            dependencies[dconfig][dependency] = {}
-    #            for k in config['initials'][dconfig][dependency]:
-    #                d = node_properties[token['self']]['dependencies'][k]
-    #                if d is not None:
-    #                    d = node_properties[d]['cells'][dconfig][dependency][k]
-    #                dependencies[dconfig][dependency][k] = d
-
-    #    self.subtree(raw_data, dependencies)
+        initial_vals = self.session.run(self.config['initials'])
+        self.cells = {} # type:ignore
+        for dconfig in initial_vals:
+            self.cells[dconfig] = {}
+            for cdependency in initial_vals[dconfig]:
+                self.cells[dconfig][cdependency] = {}
+                for dependency in initial_vals[dconfig][cdependency]:
+                    self.cells[dconfig][cdependency][dependency] = {}
+                    for k in initial_vals[dconfig][cdependency][dependency]:
+                        self.cells[dconfig][cdependency][dependency][k] = {
+                                0: { 0: { 0: initial_vals[dconfig][cdependency][dependency][k][0] } }
+                        }
 
 
 
 
+    def gather_props(self, vals, data_dict, node_id=None, node=None):
+        config = self.config
+        lexicon = config['lexicon'][None]
+        prop = nested_dict()
 
-    def infer(self, ast_data, linear_data):
+        for dconfig in vals:
+            for cdependency in vals[dconfig]:
+                v = vals[dconfig][cdependency]
+                direction = 'forward' if dconfig == 'joint_configs' or \
+                            dependency_configs[config['model']][cdependency][-1][0] else 'reverse'
+                prop[dconfig][cdependency]['direction'] = direction
+                if node is not None:
+                    idx = node[direction]['self']
+                else:
+                    idx = 1
+                if node_id is None:
+                    node_id = idx
+
+                label_target = data_dict[config['features'][direction + '-label_index']][0][idx]
+                attr_target = data_dict[config['features'][direction + '-attr_index']][0][idx]
+
+                for dependency in v['cells']:
+                    for k in v['cells'][dependency]:
+                        if node_id not in self.cells[dconfig][cdependency][dependency][k]:
+                            self.cells[dconfig][cdependency][dependency][k][node_id] = {}
+                        cells = self.cells[dconfig][cdependency][dependency][k][node_id]
+                        if label_target not in cells:
+                            cells[label_target] = {}
+                        cells[label_target][attr_target] = v['cells'][dependency][k][0][idx].tolist()
+
+                for k in vals[dconfig][cdependency]['loss']:
+                    # attr_index handled within label_index
+                    if k == 'attr_index': continue
+
+                    p = {}
+
+                    probs = v['probabilities'][k][0]
+                    if dconfig == 'joint_configs':
+                        p['alpha'] = alpha = probs[idx].tolist()
+                        sum_probs = 0
+                        for jd in range(len(joint_configs[config['model']][cdependency])):
+                            joint_dependency = joint_configs[config['model']][cdependency][jd]
+                            probs = vals['dependency_configs'][joint_dependency][k]['probabilities'][0][idx]
+                            sum_probs += alpha[jd] * probs
+                        probs = sum_probs
+                    else:
+                        probs = probs[idx]
+
+                    if k == 'label_index':
+
+                        new_probs = []
+                        for label_idx in range(len(probs)):
+                            label = (float(probs[label_idx]), lexicon['label_index_to_token'][label_idx])
+                            attr_probs = v['attr_all'][0][idx][label_idx]
+                            new_probs.extend([(label[0] * float(attr_probs[j]),
+                                                label[1], lexicon['attr_index_to_token'][j]) for j in range(len(attr_probs))])
+
+                        new_probs.sort(key=lambda x: x[0], reverse=True)
+                        p['probabilities'] = [x for x in new_probs if x[0] > .0001]
+
+                        #p['expected_subtree'] = self.generate_subtree(
+                        p['expected_label'] = new_probs[0][1]
+                        p['expected_attr'] = new_probs[0][2]
+                        p['actual_label'] = lexicon['label_index_to_token'][label_target]
+                        p['actual_attr'] = lexicon['attr_index_to_token'][attr_target]
+                        p['expected_probability'] = float(new_probs[0][0])
+                        p['actual_probability'] = float(probs[label_target]) * \
+                                                    float(v['probabilities']['attr_index'][0][idx][attr_target])
+                        p['ratio'] = p['actual_probability'] / p['expected_probability']
+                    elif k == 'pointers':
+                        p['actual'] = []
+                        for q in range(20):
+                            target = data_dict[config['features'][direction + '-pointers-mask-' + str(q)]][0][idx]
+                            p['actual'].append(target)
+                        p['expected'] = probs[idx].tolist()
+                    else:
+                        target = data_dict[config['features'][direction + '-' + k]][0][idx]
+                        p['actual'] = target
+                        p['expected'] = float(probs)
+
+                    prop[dconfig][cdependency][k] = p
+        return prop
+
+    def get_cells(self, node_id, prop, data_dict, initials_dict, test):
+        for dconfig in prop:
+            for cdependency in prop[dconfig]:
+                # TODO: this has different labels/attrs for each dependency config
+                for k in ['forward', 'reverse']:
+                    for j in ['attr', 'label']:
+                        token = prop[dconfig][cdependency]['label_index']['expected_' + j]
+                        index = self.config['lexicon'][test][j][token]
+                        data_dict[self.config['features'][k + '-' + j + '_index']] = [[0, index]]
+
+                self.session.run(self.config['tensor_iter'], data_dict)
+                vals = self.session.run(self.config['fetches'], initials_dict)
+                prop = self.gather_props(vals, data_dict, node_id=node_id)
+                return prop
+
+    def beam_step(self, props, test=None):#, label, attr, transition, dependencies):
         config = self.config
 
-        if config['model'] == 'linear':
-            # XXX XXX pass in the include_token here
-            tokens = finish_row(data, config['raw_data'], config['features'].keys())
-        else:
-            node_properties = ast_data.node_properties
-            tokens = ast_data.nodes['forward']
-            rows = process_ast(ast_data)
-            rows = finish_row(rows, config['raw_data'])
-
         data_dict = {}
-        for k in rows:
-            # skip over dependencies
-            if k in config['features']:
-                data_dict[config['features'][k]] = [rows[k]]
+        initials_dict = {}
+        for k in props['forward']:
+            for dc in config['initials']['dependency_configs']:
+                if k in config['initials']['dependency_configs'][dc]:
+                    dep_id = props['forward'][k]
+                    if dep_id == 0:
+                        dep_label_idx = 0
+                        dep_attr_idx = 0
+                    else:
+                        dep_prop = self.data.prop_map[dep_id][test]
+                        dep_label = dep_prop['dependency_configs'][dc]['label_index']['actual_label']
+                        dep_attr = dep_prop['dependency_configs'][dc]['label_index']['actual_attr']
+                        dep_label_idx = self.config['lexicon'][test]['label'][dep_label]
+                        dep_attr_idx = self.config['lexicon'][test]['attr'][dep_attr]
+                    for q in config['initials']['dependency_configs'][dc][k]:
+                        initials_dict[config['initials']['dependency_configs'][dc][k][q]] = \
+                            [self.cells['dependency_configs'][dc][k][q][dep_id][dep_label_idx][dep_attr_idx]]
+            for direction in ['forward', 'reverse']:
+                key = direction + '-' + k
+                if key not in config['features']: continue
+                if k in valid_dependencies.keys():
+                    data_dict[config['features'][key]] = [[0, 0]]
+                else:
+                    data_dict[config['features'][key]] = [[0, props[direction][k]]]
+
+        for direction in ['forward', 'reverse']:
+            data_dict[config['features'][direction + '-mask']] = [[0, 1]]
+
+        for k in config['features']:
+            if config['features'][k] not in data_dict:
+                data_dict[config['features'][k]] = [[0, 0]]
+        self.session.run(config['tensor_iter'], data_dict)
+        # need to pass in inital cell values here
+        vals = self.session.run(config['fetches'], initials_dict)
+        node_id = self.data.num_nodes
+        self.data.num_nodes+=1
+        prop = self.gather_props(vals, data_dict, node_id=node_id)
+        prop = self.get_cells(node_id, prop, data_dict, initials_dict, test)
+        return node_id, prop
+
+    def beam_row(self, parent_node_id, direction, test, dconfig, cdependency):
+        row = []
+        while True:
+            props = { 'forward': {}, 'reverse': {} }
+            props[direction]['parent'] = parent_node_id
+            props[direction]['left_sibling' if direction == 'forward' else 'right_sibling'] = \
+                    row[-1] if len(row) > 0 else 0
+            node_id, prop = self.beam_step(props)
+            props.update(prop)
+            if node_id not in self.data.prop_map:
+                self.data.prop_map[node_id] = {}
+            self.data.prop_map[node_id][test] = props
+            row.append(node_id)
+            if prop[dconfig][cdependency]['last_sibling' if direction == 'forward' else 'first_sibling']['expected'] > 0.5:
+                break
+        if direction == 'reverse':
+            row.reverse()
+        return row
+
+    def beam(self, dconfig, cdependency, node_id=39, test=None):
+        direction = 'forward' if dconfig == 'joint_configs' or \
+                    dependency_configs[self.config['model']][cdependency][-1][0] else 'reverse'
+
+        queue = [node_id]
+        while len(queue) > 0:
+            node_id = queue.pop(0)
+            row = self.beam_row(node_id, direction, test, dconfig, cdependency)
+            # TODO: learn these from the data
+            # ExpressionList? Have an attr that is if it is empty or not
+            for node_id in row:
+                prop = self.data.prop_map[node_id][test][dconfig][cdependency]
+                if prop['label_index']['actual_label'] not in ['Constant', 'IdentifierType', 'ID', 'ExpressionList', 'Exprlist']:
+                    queue.append(node_id)
+
+
+
+    def infer(self, data):
+        config = self.config
+
+        rows = process_ast(data, lexicon={'ast':config['lexicon']})
+        rows = finish_row(rows, config['lexicon'])
+
+        for test in config['lexicon']:
+            for i in range(len(data.nodes[test]['forward'])):
+                transition = data.nodes[test]['forward'][i]['transitions']
+                data.nodes[test]['forward'][i]['transitions_percentage'] = config['lexicon'][test]['transition_percentages'][transition] if transition in config['lexicon'][test]['transition_percentages'] else 0
+
+        test = None
+        data_dict = {}
+        for k in config['features']:
+            data_dict[config['features'][k]] = [rows[test][k]]
 
         self.session.run(config['tensor_iter'], data_dict)
 
-        vals = self.session.run(config['fetches'], config['feed_dict'])
-        for k in config['feed_dict']:
-            config['feed_dict'][k] = True
+        vals = self.session.run(config['fetches'])
 
-        props = tokens if tokens is not None else []
-        for i in range(len(tokens)):
-            token = tokens[i][1] if config['model'] == 'linear' else tokens[i]['label']
-            prop = {'label': token, 'cells': {}}
-            for dconfig in vals:
-                prop[dconfig] = {}
-                prop['cells'][dconfig] = {}
-                for dependency in vals[dconfig]:
-                    prop['cells'][dconfig][dependency] = {}
-                    for k in vals[dconfig][dependency]['cells']:
-                        direction = 'forward' if dconfig == 'joint_configs' or \
-                                    dependency_configs[config['model']][dependency][-1][0] else 'reverse'
-                        idx = tokens[i][direction]['self']
-                        prop['cells'][dconfig][dependency][k] = {
-                            'output': [vals[dconfig][dependency]['cells'][k]['output'][0][idx]],
-                            'states': []
-                        }
-                        for layer in range(config['num_layers']):
-                            prop['cells'][dconfig][dependency][k]['states'].append({
-                                'c': [vals[dconfig][dependency]['cells'][k]['states'][layer]['c'][0][idx]],
-                                'h': [vals[dconfig][dependency]['cells'][k]['states'][layer]['h'][0][idx]]
-                            })
-
-                    prop[dconfig][dependency] = {}
-                    for k in vals[dconfig][dependency]['loss']:
-                        #if i == 0:
-                        #    print('{} {} {} perplexity: {}'.format(dconfig, dependency,
-                        #            k, np.exp(vals[dconfig][dependency]['loss'][k])))
-
-                        prop[dconfig][dependency][k] = p = {}
-
-                        probs = vals[dconfig][dependency]['probabilities'][k][0]
-                        target = data_dict[config['features'][direction + '_' + k]][0]
-                        if dconfig == 'joint_configs':
-                            p['alpha'] = alpha = probs[idx].tolist()
-                            sum_probs = 0
-                            for jd in range(len(joint_configs[config['model']][dependency])):
-                                joint_dependency = joint_configs[config['model']][dependency][jd]
-                                probs = vals['dependency_configs'][joint_dependency][k]['probabilities'][0][idx]
-                                sum_probs += alpha[jd] * probs
-                            probs = sum_probs
-                        if k in ['label_index', 'attr_index']:
-                            if dconfig != 'joint_configs':
-                                probs = probs[idx]
-                            rank = np.flip(np.argsort(probs), 0)
-                            p['expected'] = config['raw_data'][k + '_to_token'][rank[0]]
-                            p['actual'] = config['raw_data'][k + '_to_token'][target[idx]]
-                            p['expected_probability'] = float(probs[rank[0]])
-                            p['actual_probability'] = float(probs[target[idx]])
-                            p['ratio'] = float(probs[target[idx]] / (probs[rank[0]]))
-                            p['probabilities'] = [(float(probs[j]), config['raw_data'][k+'_to_token'][j]) for j in rank]
-                        else:
-                            p['actual'] = target[idx]
-                            p['expected'] = float(probs[idx])
-
-            if node_properties is None:
-                props.append(prop)
-            else:
-                props[i].update(prop)
-
-        return props
+        nodes = data.nodes[test]['forward']
+        for i in range(len(nodes)):
+            nodes[i].update(self.gather_props(vals, data_dict, node=nodes[i]))
 
 
     def process_code(self, code):
-        ast_data, linear_data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         try:
             ast_data, linear_data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         except Exception as e:
             # TODO
             return {'error': "Couldn't parse code." + str(e)}
 
-        self.infer(ast_data, linear_data)
-        #for i in range(len(ast_data.visited)):
-        #    ast_data.visited[i] = list(ast_data.visited[i].values())
+        data = ast_data if self.config['model'] == 'ast' else linear_data
+        self.data = data
 
+        self.infer(data)
+        self.beam('dependency_configs', 'd2')
 
-        if self.config['model'] == 'ast':
-            output = {
-                'code': CGenerator(ast_data).visit(ast_data.ast),
-                'test_results': ast_data.results,
-                #'visited': ast_data.visited
-            }
-        else:
-            # TODO: linear case
-            output = {}
+        output = {
+            'code': CGenerator(data).code,
+            'test_results': data.results,
+            'props': data.prop_map
+        }
         return output

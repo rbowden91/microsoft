@@ -1,4 +1,4 @@
-from ..my_env.typing import NamedTuple, List, Optional, TypeVar, Type
+from typing import NamedTuple, List, Optional, TypeVar, Type
 from .preprocessor import Preprocessor
 from .external import ExternalCPP
 

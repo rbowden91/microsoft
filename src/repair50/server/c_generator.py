@@ -1,6 +1,8 @@
 # based heavily on the version from pycparser
 
-from pycparser import c_ast
+from pycparser import c_ast # type:ignore
+from ..wrangler.normalizers.NodeWrapper import NodeWrapper
+from ..wrangler.normalizers.ExpressionList import ExpressionList
 
 
 class CGenerator(object):
@@ -11,6 +13,8 @@ class CGenerator(object):
         self.indent_level = 0
         self.line = 1
         self.ast_data = ast_data
+
+        self.code = self.visit(ast_data.ast)
 
     def _mp(self, class_, value):
         return { 'class': class_, 'value': value }
@@ -60,11 +64,13 @@ class CGenerator(object):
 
 
     def _get_id(self, node):
-        return self.ast_data.node_properties[node]['node_num']
+        return node.node_properties['node_num']
 
     def visit(self, node):
         if node is None:
-            return {'class': 'empty'}#{'id': self.ast_data.node_properties[node]['forward']['self'], 'value': []}
+            return {'class': 'empty'}
+        if isinstance(node, NodeWrapper):
+            return self.visit(node.new)
 
         method = 'visit_' + node.__class__.__name__
 
@@ -82,10 +88,7 @@ class CGenerator(object):
                 'id': self._get_id(node)}
         ret['starting_line'] = lineno
         ret['ending_line'] = self.line
-        ret.update(self.ast_data.node_properties[node])
-        for k in ['self', 'dependencies', 'cells']:
-            if k in ret:
-                del(ret[k])
+        #ret.update(node.node_properties)
         return ret
 
     #def generic_visit(self, node):
@@ -101,8 +104,8 @@ class CGenerator(object):
         return [self._mp(class_, n.value)]
 
     def visit_ID(self, n):
-        if n in self.ast_data.node_properties and 'original_name' in self.ast_data.node_properties[n]:
-            name = self.ast_data.node_properties[n]['original_name']
+        if 'original_name' in n.node_properties:
+            name = n.node_properties['original_name']
         else:
             name = n.name
         return [self._make_id(name)]
@@ -179,7 +182,7 @@ class CGenerator(object):
         # explicitly only for the first declaration in a list.
         #
         ret = []
-        props = self.ast_data.node_properties[n]
+        props = n.node_properties
         if 'no_type' in props:
             name = n.name if 'original_name' not in props else props['original_name']
             ret.append(self._make_id(name))
@@ -198,7 +201,7 @@ class CGenerator(object):
         ret = [self.visit(n.decls[0])]
         for i in range(1, len(n.decls)):
             ret.extend([self._make_raw(','), self._make_space()])
-            self.ast_data.node_properties[n.decls[i]]['no_type'] = True
+            n.decls[i].node_properties['no_type'] = True
             ret.append(self.visit(n.decls[i]))
         return ret
 
@@ -215,6 +218,11 @@ class CGenerator(object):
         self._paren(ret)
         ret.append(self._make_space())
         ret.extend(self._parenthesize_unless_simple(n.expr))
+        return ret
+
+    def visit_ExpressionList(self, n):
+        ret = []
+        [ret.append(self._generate_stmt(x)) for x in n.expressions]
         return ret
 
     def visit_ExprList(self, n):
@@ -262,6 +270,9 @@ class CGenerator(object):
     def visit_FileAST(self, n):
         ret = []
         for ext in n.ext:
+            tmp = self.visit(ext)
+            if tmp['class'] == 'empty':
+                continue
             ret.append(self.visit(ext))
             if isinstance(ext, c_ast.Pragma):
                 ret.append(self._make_newline())
@@ -460,7 +471,7 @@ class CGenerator(object):
         if add_indent: self.indent_level -= 1
 
         ret = self.visit(n)
-        if typ in (c_ast.Compound,):
+        if typ in (c_ast.Compound, ExpressionList) or ret['class'] == 'empty':
             return ret
         ret['value'].insert(0, indent)
 
@@ -509,8 +520,8 @@ class CGenerator(object):
             ret.append(self.visit(n.type))
 
             if n.declname:
-                if n in self.ast_data.node_properties and 'original_name' in self.ast_data.node_properties[n]:
-                    name = self.ast_data.node_properties[n]['original_name']
+                if 'original_name' in n.node_properties:
+                    name = n.node_properties['original_name']
                 else:
                     name = n.declname
             else:

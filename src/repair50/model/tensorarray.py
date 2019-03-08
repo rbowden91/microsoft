@@ -141,7 +141,7 @@ class RNNTensorArrayCell():
                 (output, new_state) = self.cell(inp, old_state)
 
             if add_idx is not None:
-                add_state = self.get_lstm_state(data, add_idx, add_state=new_state)
+                new_state = self.get_lstm_state(data, add_idx, add_state=new_state)
 
                 # don't add to the initial output if we are the right-most sibling
                 new_output = tf.matmul(output, self.u_child)
@@ -178,10 +178,8 @@ class RNNTensorArrayCell():
 
         self.data[dependency] = data = []
         self.rnn[dependency] = rnn = []
-        self.initials[dependency] = initial = {
-            'states': [],
-            'output': None
-        }
+        self.fetches[dependency] = fetches = {}
+        self.initials[dependency] = initials = {}
         for layer in range(self.num_layers):
             data.append({
                 'state': self.init_lstm_array(),
@@ -192,39 +190,33 @@ class RNNTensorArrayCell():
                 data[layer]['child_output'] = self.array.init_tensor_array()
             rnn.append(self.RNNWrapper(dependency, layer, is_last_layer, self.array))
             with tf.variable_scope(rnn[layer].scope):
-                initial['states'].append({
-                    'c': tf.get_variable('lstm_state_c', [1, self.array.hidden_size], self.array.data_type),
-                    'h': tf.get_variable('lstm_state_h', [1, self.array.hidden_size], self.array.data_type)
-                })
-
                 # initial state
-                rnn[layer].save_lstm_state(self.data, 0, tf.contrib.rnn.LSTMStateTuple(initial['states'][-1]['c'],
-                                                                                       initial['states'][-1]['h']))
+                initial = { 'c': tf.get_variable('lstm_state_c' + str(layer) + dependency,
+                                        [1, self.array.hidden_size], self.array.data_type),
+                            'h': tf.get_variable('lstm_state_h' + str(layer) + dependency,
+                                        [1, self.array.hidden_size], self.array.data_type)}
+                rnn[layer].save_lstm_state(self.data, 0, tf.contrib.rnn.LSTMStateTuple(initial['c'],
+                                                                                       initial['h']))
+                for i in ['c', 'h']:
+                    key = 'states-' + str(layer) + '-' + i
+                    fetches[key] = lambda: rnn[layer].stack_state(self.data)[i]
+                    initials[key] = initial[i]
 
-                # writing zeros is not strictly necessary, but we want to be able to .stack() the TensorArray,
-                # so it has to be full.
-                zeros = tf.zeros([1, self.array.hidden_size], self.array.data_type)
+                # theoretically, we may not need anything other than the last output, but save all layers anyway
+                initial_output = tf.get_variable('lstm_initial_output' + str(layer) + dependency,
+                                        [1, self.array.hidden_size], self.array.data_type)
 
-                # the last layer is the one that will end up in initial['output'], which is what we want
-                initial['output'] = tf.get_variable('lstm_initial_output', [1, self.array.hidden_size],
-                                                    self.array.data_type) if is_last_layer else zeros
-
-                child_output = dependency == 'children' and is_last_layer
-                rnn[layer].save_output(self.data, 0, initial['output'], child_output)
-                if child_output:
-                    rnn[layer].save_output(self.data, 0, zeros)
-
-    # TODO: doesn't handle children output
-    def get_fetches(self):
-        fetches = {}
-        for dependency in self.data:
-            fetches[dependency] = {
-                'states': [],
-                'output': self.rnn[dependency][self.num_layers-1].stack_output(self.data)
-            }
-            for layer in range(self.num_layers):
-                fetches[dependency]['states'].append(self.rnn[dependency][layer].stack_state(self.data))
-        return fetches
+                rnn[layer].save_output(self.data, 0, initial_output)
+                key = 'outputs-' + str(layer)
+                fetches[key] =  lambda: rnn[layer].stack_output(self.data)
+                initials[key] = initial_output
+                if dependency == 'children' and is_last_layer:
+                    initial_child_output = tf.get_variable('lstm_initial_child_output' + str(layer) + dependency,
+                                            [1, self.array.hidden_size], self.array.data_type)
+                    rnn[layer].save_output(self.data, 0, initial_child_output, True)
+                    key = 'child-outputs-' + str(layer)
+                    fetches[key] = lambda: rnn[layer].stack_output(self.data, True)
+                    initials[key] = initial_child_output
 
     def __init__(self, dependencies, data_length, hidden_size, batch_size, num_layers, data_type):
         self.num_layers = num_layers
@@ -236,18 +228,8 @@ class RNNTensorArrayCell():
         # all cells pull from the same pool of data
         self.data = {}
         self.rnn = {}
+        self.fetches = {}
         self.initials = {}
 
         for d in dependencies:
             self.add_dependency(d)
-
-        # store the LSTM state in a TensorArray
-        #def save_multi_lstm_state(self, array, position, state):
-        #    for i in range(self.num_layers):
-        #        self.save_lstm_state(array[i], state[i], position)
-
-        #def restore_multi_lstm_state(self, array, position):
-        #    state = []
-        #    for i in range(self.num_layers):
-        #        state.append(self.get_lstm_state(array[i], position))
-        #    return tuple(state
