@@ -130,18 +130,13 @@ class TRNNBaseModel(object):
         return iterator.get_next(), iter_ops, placeholders
 
 
-    def __init__(self, is_joint, model, dconfig, label_size, attr_size, hidden_size,
-                 features, num_layers, max_grad_norm, rows=None):
+    def __init__(self, is_joint, dconfig, config, transitions, rows=None):
         self.is_joint = is_joint
-        self.model = model
         self.dconfig = dconfig
-        self.label_size = label_size
-        self.attr_size = attr_size
-        self.hidden_size = hidden_size
+        self.transitions = transitions
+        for k in ['label_size', 'attr_size', 'transitions_size', 'hidden_size', 'features', 'num_layers', 'max_grad_norm']:
+            setattr(self, k, config[k])
         self.mem_size = 20
-        self.features = features
-        self.num_layers = num_layers
-        self.max_grad_norm = max_grad_norm
 
         # grab the current scope, in case the model was instantiated within a scope
         # only update the subset of weights relevant to these losses
@@ -149,9 +144,9 @@ class TRNNBaseModel(object):
         if self.super_scope != '':
             self.super_scope += '/'
 
-        self.scope = "{}/{}/{}".format(model, 'Joint' if is_joint else 'Dependency', dconfig)
+        self.scope = "{}/{}".format('Joint' if is_joint else 'Dependency', dconfig)
         depends = dependency_configs if not is_joint else joint_configs
-        self.dependencies = depends[model][dconfig]
+        self.dependencies = depends[dconfig]
 
         # these four fields are meant to be accessed outside the model, and can be exported via
         # model.output_tensor_names()
@@ -299,11 +294,19 @@ class TRNNModel(TRNNBaseModel):
         def tile(matrix):
             return tf.tile(matrix, [self.num_rows, 1, 1])
 
-        # this is the only directional loss that linear uses
-        logits['label_index'] = tf.matmul(h_pred, tile(p['label_w'])) + p['label_b']
-        labels['label_index'] = rows['label_index']
+        end = 'last_sibling' if (direction == 'forward') == forward_array else 'first_sibling'
 
-        if self.model == 'ast':
+        if self.transitions:
+            logits['transitions_index'] = tf.matmul(h_pred, tile(p['transitions_w'])) + p['transitions_b']
+            labels['transitions_index'] = rows['transitions_index']
+
+            #u_end = tf.gather(p['u_end'], rows['transitions_index'])
+            #logits[end] = tf.reduce_sum(tf.multiply(u_end, h_pred), axis=1)
+            #labels[end] = tf.cast(rows[end], data_type())
+        else:
+            logits['label_index'] = tf.matmul(h_pred, tile(p['label_w'])) + p['label_b']
+            labels['label_index'] = rows['label_index']
+
             # batch_size x data_length x size x attr_size
             attr_w = tf.gather(p['attr_w'], rows['label_index'])
             # batch_size x data_length x attr_size
@@ -316,7 +319,6 @@ class TRNNModel(TRNNBaseModel):
             self.fetches['attr_all'] = tf.nn.softmax(tf.tensordot(h_pred, p['attr_w'], [[2],[1]]) + p['attr_b'])
 
             # loss for whether we are the last sibling on the left or right
-            end = 'last_sibling' if (direction == 'forward') == forward_array else 'first_sibling'
             u_end = tf.gather_nd(p['u_end'], tf.stack([rows['label_index'], rows['attr_index']], axis=2))
             # TODO: bias?
             logits[end] = tf.reduce_sum(tf.multiply(u_end, h_pred), axis=2)
@@ -351,12 +353,16 @@ class TRNNModel(TRNNBaseModel):
 
     @define_scope
     def embed(self, index, direction, parent=False):
-        label_index = self.rows[direction]['label_index' if not parent else 'parent_label_index'][:,index]
-        attr_index = self.rows[direction]['attr_index' if not parent else 'parent_attr_index'][:,index]
+        if self.transitions:
+            transitions_index = self.rows[direction]['transitions_index' if not parent else 'parent_transitions_index'][:,index]
+            return tf.gather(self.params['transitions_embed'], transitions_index, name="TransitionsEmbedGather", axis=0)
+        else:
+            label_index = self.rows[direction]['label_index' if not parent else 'parent_label_index'][:,index]
+            attr_index = self.rows[direction]['attr_index' if not parent else 'parent_attr_index'][:,index]
 
-        node_label_embedding = tf.gather(self.params['label_embed'], label_index, name="LabelEmbedGather", axis=0)
-        node_attr_embedding = tf.gather(self.params['attr_embed'], attr_index, name="AttrEmbedGather", axis=0)
-        node_embedding = tf.concat([node_label_embedding, node_attr_embedding], 1)
+            node_label_embedding = tf.gather(self.params['label_embed'], label_index, name="LabelEmbedGather", axis=0)
+            node_attr_embedding = tf.gather(self.params['attr_embed'], attr_index, name="AttrEmbedGather", axis=0)
+            node_embedding = tf.concat([node_label_embedding, node_attr_embedding], 1)
         return node_embedding
 
     @define_scope
@@ -364,6 +370,7 @@ class TRNNModel(TRNNBaseModel):
         # declare a bunch of parameters that will be reused later. doesn't actually do anything
         size = self.hidden_size
         label_size = self.label_size
+        transitions_size = self.transitions_size
         attr_size = self.attr_size
         embed_size = size / 2
 
@@ -374,26 +381,31 @@ class TRNNModel(TRNNBaseModel):
             for dependency in dependencies:
                 all_dependencies.add(dependency)
 
-        params['u_end'] = tf.get_variable('u_end', [label_size, attr_size, size], dtype=data_type())
+        if self.transitions:
+            params['u_end'] = tf.get_variable('u_end', [transitions_size, size], dtype=data_type())
+            params['transitions_w'] = tf.get_variable("transitions_w", [1, size, transitions_size], dtype=data_type())
+            params['transitions_b'] = tf.get_variable("transitions_b", [1, transitions_size], dtype=data_type())
+            params['transitions_embed'] = tf.get_variable("transitions_embedding", [transitions_size, size], dtype=data_type())
+        else:
+            params['u_end'] = tf.get_variable('u_end', [label_size, attr_size, size], dtype=data_type())
 
-        params['attr_w'] = tf.get_variable("attr_w", [label_size, size, attr_size], dtype=data_type())
-        params['attr_b'] = tf.get_variable("attr_b", [label_size, attr_size], dtype=data_type())
-        #params['attr_v'] = tf.get_variable("attr_v", [label_size, attr_size], dtype=data_type())
+            params['attr_w'] = tf.get_variable("attr_w", [label_size, size, attr_size], dtype=data_type())
+            params['attr_b'] = tf.get_variable("attr_b", [label_size, attr_size], dtype=data_type())
+            #params['attr_v'] = tf.get_variable("attr_v", [label_size, attr_size], dtype=data_type())
 
-        params['label_w'] = tf.get_variable("label_w", [1, size, label_size], dtype=data_type())
-        params['label_b'] = tf.get_variable("label_b", [1, label_size], dtype=data_type())
+            params['label_w'] = tf.get_variable("label_w", [1, size, label_size], dtype=data_type())
+            params['label_b'] = tf.get_variable("label_b", [1, label_size], dtype=data_type())
 
-        params['pointers_w1'] = tf.get_variable("pointers_w1", [size, size], dtype=data_type())
-        params['pointers_w2'] = tf.get_variable("pointers_w2", [size, self.mem_size * size], dtype=data_type())
-        params['pointers_v'] = tf.get_variable("pointers_v", [1, 1, self.mem_size, size], dtype=data_type())
-        params['pointers_b'] = tf.get_variable("pointers_b", [1, 1, self.mem_size, size], dtype=data_type())
 
-        #if d == 'reverse':
-        #    p[d]['u_right_hole'] = tf.get_variable('u_right_hole', [1, size * 2], dtype=data_type())
+            params['pointers_w1'] = tf.get_variable("pointers_w1", [size, size], dtype=data_type())
+            params['pointers_w2'] = tf.get_variable("pointers_w2", [size, self.mem_size * size], dtype=data_type())
+            params['pointers_v'] = tf.get_variable("pointers_v", [1, 1, self.mem_size, size], dtype=data_type())
+            params['pointers_b'] = tf.get_variable("pointers_b", [1, 1, self.mem_size, size], dtype=data_type())
 
-        #with tf.device("/cpu:0"):
-        params['label_embed'] = tf.get_variable("label_embedding", [label_size, embed_size], dtype=data_type())
-        params['attr_embed'] = tf.get_variable("attr_embedding", [attr_size, embed_size], dtype=data_type())
+            #if d == 'reverse':
+            #    p[d]['u_right_hole'] = tf.get_variable('u_right_hole', [1, size * 2], dtype=data_type())
+            params['label_embed'] = tf.get_variable("label_embedding", [label_size, embed_size], dtype=data_type())
+            params['attr_embed'] = tf.get_variable("attr_embedding", [attr_size, embed_size], dtype=data_type())
 
         # no need to add in the extra parameters if we aren't combining with any other output
         if len(all_dependencies) > 1:

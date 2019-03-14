@@ -8,7 +8,7 @@ import tensorflow as tf #type:ignore
 import collections
 
 from ..model.config import joint_configs, dependency_configs, valid_dependencies #type:ignore
-from ..wrangler import finish_row, wrangle, process_ast #type:ignore
+from ..wrangler.wrangle import finish_row, wrangle, process_ast #type:ignore
 from .c_generator import CGenerator
 
 nested_dict = lambda: collections.defaultdict(nested_dict) #type:ignore
@@ -91,80 +91,63 @@ class Server(object):
     # TODO: close self.session in Server deconstructor?
     # TODO: pass in the config directly instead of data_path
     def __init__(self, data_path) -> None:
-        best_dir = os.path.join(data_path, 'best')
-        with open(os.path.join(best_dir, 'config.json')) as f:
+        with open(os.path.join(data_path, 'config.json')) as f:
             self.config = json.load(f)
-        self.config['best_dir'] = best_dir
 
-        # we have to find the model that we can feed...
-        self.config['fetches'] = fetches = {} # type: ignore
-        self.config['initials'] = initials = {} # type: ignore
-        #self.config['feed_dict'] = feed = {} # type: ignore
-        for d in self.config['models']:
-            fetches[d] = {}
-            initials[d] = {}
-            for i in self.config['models'][d]:
-                #feed[self.config['models'][d][i]['placeholders']['is_inference']] = False
-                fetches[d][i] = self.config['models'][d][i]['fetches']
-                initials[d][i] = self.config['models'][d][i]['initials']
+        for transitions in self.config['tests']:
+            for test in self.config['tests'][transitions]:
+                best_dir = os.path.join(data_path, 'best')
+                with open(self.config['tests'][transitions][test]['model_config_file'], 'r') as f:
+                    self.config['tests'][transitions][test] = test_conf = json.load(f)
 
-                for j in self.config['models'][d][i]['placeholders']:
-                    if 'features' == j:
-                        self.config['features'] = self.config['models'][d][i]['placeholders'][j]
-                        self.config['tensor_iter'] = self.config['models'][d][i]['ops']['tensor_iter']
+                # we have to find the model that we can feed...
+                test_conf['fetches'] = fetches = {} # type: ignore
+                test_conf['initials'] = initials = {} # type: ignore
+                for d in test_conf['models']:
+                    fetches[d] = {}
+                    initials[d] = {}
+                    for i in test_conf['models'][d]:
+                        fetches[d][i] = test_conf['models'][d][i]['fetches']
+                        initials[d][i] = test_conf['models'][d][i]['initials']
 
-        if 'features' not in self.config:
-            print('yikes')
-            return
+                        for j in test_conf['models'][d][i]['placeholders']:
+                            if 'features' == j:
+                                test_conf['features'] = test_conf['models'][d][i]['placeholders'][j]
+                                test_conf['tensor_iter'] = test_conf['models'][d][i]['ops']['tensor_iter']
 
-        # fix windows path separators TODO: this isn't particularly portable?
-        self.config['data_path'] = os.path.join(*self.config['data_path'].split('\\'))
+                assert 'features' in test_conf
 
-        with open(os.path.join(self.config['data_path'], self.config['model'] + '_lexicon.json')) as f:
-            token_ids = json.load(f)
-        token_ids[None] = token_ids['null']
-        del(token_ids['null'])
+                test_conf['graph'] = tf.Graph()
+                with test_conf['graph'].as_default():
+                    saver = tf.train.import_meta_graph(os.path.join(test_conf['best_dir'], "model.meta"))
+                    test_conf['session'] = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 0}))
+                    saver.restore(test_conf['session'], os.path.join(test_conf['best_dir'], 'model'))
 
+                initial_vals = test_conf['session'].run(test_conf['initials'])
+                test_conf['cells'] = {} # type:ignore
+                for dconfig in initial_vals:
+                    test_conf['cells'][dconfig] = {}
+                    for cdependency in initial_vals[dconfig]:
+                        test_conf['cells'][dconfig][cdependency] = {}
+                        for dependency in initial_vals[dconfig][cdependency]:
+                            test_conf['cells'][dconfig][cdependency][dependency] = {}
+                            for k in initial_vals[dconfig][cdependency][dependency]:
+                                test_conf['cells'][dconfig][cdependency][dependency][k] = {
+                                        0: { 0: { 0: initial_vals[dconfig][cdependency][dependency][k][0] } }
+                                }
 
-        for test in token_ids:
-            for k in list(token_ids[test].keys()):
-                token_ids[test][k + '_index_to_token'] = {}
-                for token in token_ids[test][k]:
-                    token_ids[test][k + '_index_to_token'][token_ids[test][k][token]] = token
-        self.config['lexicon'] = token_ids
+        print('Server initialized')
 
-        self.graph = tf.Graph()
-        with self.graph.as_default():
-            saver = tf.train.import_meta_graph(os.path.join(self.config['best_dir'], "model.meta"))
-            self.session = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 0}))
-            saver.restore(self.session, os.path.join(self.config['best_dir'], 'model'))
-
-        initial_vals = self.session.run(self.config['initials'])
-        self.cells = {} # type:ignore
-        for dconfig in initial_vals:
-            self.cells[dconfig] = {}
-            for cdependency in initial_vals[dconfig]:
-                self.cells[dconfig][cdependency] = {}
-                for dependency in initial_vals[dconfig][cdependency]:
-                    self.cells[dconfig][cdependency][dependency] = {}
-                    for k in initial_vals[dconfig][cdependency][dependency]:
-                        self.cells[dconfig][cdependency][dependency][k] = {
-                                0: { 0: { 0: initial_vals[dconfig][cdependency][dependency][k][0] } }
-                        }
-
-
-
-
-    def gather_props(self, vals, data_dict, node_id=None, node=None):
-        config = self.config
-        lexicon = config['lexicon'][None]
+    def gather_props(self, vals, data_dict, config, node_id=None, node=None):
+        revlex = config['lexicon']['index_to_token']
+        lex = config['lexicon']['token_to_index']
         prop = nested_dict()
 
         for dconfig in vals:
             for cdependency in vals[dconfig]:
                 v = vals[dconfig][cdependency]
                 direction = 'forward' if dconfig == 'joint_configs' or \
-                            dependency_configs[config['model']][cdependency][-1][0] else 'reverse'
+                            dependency_configs[cdependency][-1][0] else 'reverse'
                 prop[dconfig][cdependency]['direction'] = direction
                 if node is not None:
                     idx = node[direction]['self']
@@ -173,17 +156,24 @@ class Server(object):
                 if node_id is None:
                     node_id = idx
 
-                label_target = data_dict[config['features'][direction + '-label_index']][0][idx]
-                attr_target = data_dict[config['features'][direction + '-attr_index']][0][idx]
+                if config['transitions']:
+                    token_target = data_dict[config['features'][direction + '-transitions_index']][0][idx]
+                else:
+                    token_target = data_dict[config['features'][direction + '-label_index']][0][idx]
+                    attr_target = data_dict[config['features'][direction + '-attr_index']][0][idx]
 
                 for dependency in v['cells']:
                     for k in v['cells'][dependency]:
-                        if node_id not in self.cells[dconfig][cdependency][dependency][k]:
-                            self.cells[dconfig][cdependency][dependency][k][node_id] = {}
-                        cells = self.cells[dconfig][cdependency][dependency][k][node_id]
-                        if label_target not in cells:
-                            cells[label_target] = {}
-                        cells[label_target][attr_target] = v['cells'][dependency][k][0][idx].tolist()
+                        if node_id not in config['cells'][dconfig][cdependency][dependency][k]:
+                            config['cells'][dconfig][cdependency][dependency][k][node_id] = {}
+                        cells = config['cells'][dconfig][cdependency][dependency][k][node_id]
+                        if config['transitions']:
+                            cells[token_target] = v['cells'][dependency][k][0][idx].tolist()
+
+                        else:
+                            if token_target not in cells:
+                                cells[token_target] = {}
+                            cells[token_target][attr_target] = v['cells'][dependency][k][0][idx].tolist()
 
                 for k in vals[dconfig][cdependency]['loss']:
                     # attr_index handled within label_index
@@ -195,45 +185,54 @@ class Server(object):
                     if dconfig == 'joint_configs':
                         p['alpha'] = alpha = probs[idx].tolist()
                         sum_probs = 0
-                        for jd in range(len(joint_configs[config['model']][cdependency])):
-                            joint_dependency = joint_configs[config['model']][cdependency][jd]
+                        for jd in range(len(joint_configs[cdependency])):
+                            joint_dependency = joint_configs[cdependency][jd]
                             probs = vals['dependency_configs'][joint_dependency][k]['probabilities'][0][idx]
                             sum_probs += alpha[jd] * probs
                         probs = sum_probs
                     else:
                         probs = probs[idx]
 
-                    if k == 'label_index':
+                    if k == 'label_index' or k == 'transitions_index':
 
-                        new_probs = []
-                        for label_idx in range(len(probs)):
-                            label = (float(probs[label_idx]), lexicon['label_index_to_token'][label_idx])
-                            attr_probs = v['attr_all'][0][idx][label_idx]
-                            new_probs.extend([(label[0] * float(attr_probs[j]),
-                                                label[1], lexicon['attr_index_to_token'][j]) for j in range(len(attr_probs))])
+                        p['actual_probability'] = float(probs[token_target])
+                        if not config['transitions']:
+                            p['actual_probability'] *= float(v['probabilities']['attr_index'][0][idx][attr_target])
 
-                        new_probs.sort(key=lambda x: x[0], reverse=True)
-                        p['probabilities'] = [x for x in new_probs if x[0] > .0001]
+                        if k == 'label_index':
+                            new_probs = []
+                            for token_idx in range(len(probs)):
+                                token = (float(probs[token_idx]), revlex['label'][str(token_idx)])
 
-                        #p['expected_subtree'] = self.generate_subtree(
-                        p['expected_label'] = new_probs[0][1]
-                        p['expected_attr'] = new_probs[0][2]
-                        p['actual_label'] = lexicon['label_index_to_token'][label_target]
-                        p['actual_attr'] = lexicon['attr_index_to_token'][attr_target]
-                        p['expected_probability'] = float(new_probs[0][0])
-                        p['actual_probability'] = float(probs[label_target]) * \
-                                                    float(v['probabilities']['attr_index'][0][idx][attr_target])
-                        p['ratio'] = p['actual_probability'] / p['expected_probability']
+                                attr_probs = v['attr_all'][0][idx][token_idx]
+                                new_probs.extend([(token[0] * float(attr_probs[j]),
+                                                    token[1], revlex['attr'][str(j)]) for j in range(len(attr_probs))])
+                            probs = new_probs
+                            key = 'label'
+                        else:
+                            probs = [(float(probs[j]), revlex['transitions'][str(j)]) for j in range(len(probs))]
+                            #probs = probs.tolist()
+                            key = 'transitions'
+
+                        probs.sort(key=lambda x: x[0], reverse=True)
+                        p['probabilities'] = [x for x in probs if x[0] > .001]
+                        p['actual_token'] = revlex[key][str(token_target)]
+                        if k == 'label_index':
+                            p['actual_attr'] = revlex['attr'][str(attr_target)]
+                        else:
+                            p['transition_groups'] = config['transitions_groups'][p['actual_token']] if p['actual_token'] in config['transitions_groups'] else False
+                        expected_probability = float(probs[0][0])
+                        p['ratio'] = p['actual_probability'] / expected_probability
                     elif k == 'pointers':
                         p['actual'] = []
                         for q in range(20):
                             target = data_dict[config['features'][direction + '-pointers-mask-' + str(q)]][0][idx]
                             p['actual'].append(target)
-                        p['expected'] = probs[idx].tolist()
+                        p['expected'] = probs.tolist()
                     else:
                         target = data_dict[config['features'][direction + '-' + k]][0][idx]
                         p['actual'] = target
-                        p['expected'] = float(probs)
+                        p['expected'] = probs.tolist()
 
                     prop[dconfig][cdependency][k] = p
         return prop
@@ -248,8 +247,8 @@ class Server(object):
                         index = self.config['lexicon'][test][j][token]
                         data_dict[self.config['features'][k + '-' + j + '_index']] = [[0, index]]
 
-                self.session.run(self.config['tensor_iter'], data_dict)
-                vals = self.session.run(self.config['fetches'], initials_dict)
+                config['session'].run(self.config['tensor_iter'], data_dict)
+                vals = config['session'].run(self.config['fetches'], initials_dict)
                 prop = self.gather_props(vals, data_dict, node_id=node_id)
                 return prop
 
@@ -273,7 +272,7 @@ class Server(object):
                         dep_attr_idx = self.config['lexicon'][test]['attr'][dep_attr]
                     for q in config['initials']['dependency_configs'][dc][k]:
                         initials_dict[config['initials']['dependency_configs'][dc][k][q]] = \
-                            [self.cells['dependency_configs'][dc][k][q][dep_id][dep_label_idx][dep_attr_idx]]
+                            [config['cells']['dependency_configs'][dc][k][q][dep_id][dep_label_idx][dep_attr_idx]]
             for direction in ['forward', 'reverse']:
                 key = direction + '-' + k
                 if key not in config['features']: continue
@@ -288,9 +287,9 @@ class Server(object):
         for k in config['features']:
             if config['features'][k] not in data_dict:
                 data_dict[config['features'][k]] = [[0, 0]]
-        self.session.run(config['tensor_iter'], data_dict)
+        config['session'].run(config['tensor_iter'], data_dict)
         # need to pass in inital cell values here
-        vals = self.session.run(config['fetches'], initials_dict)
+        vals = config['session'].run(config['fetches'], initials_dict)
         node_id = self.data.num_nodes
         self.data.num_nodes+=1
         prop = self.gather_props(vals, data_dict, node_id=node_id)
@@ -318,7 +317,7 @@ class Server(object):
 
     def beam(self, dconfig, cdependency, node_id=39, test=None):
         direction = 'forward' if dconfig == 'joint_configs' or \
-                    dependency_configs[self.config['model']][cdependency][-1][0] else 'reverse'
+                    dependency_configs[cdependency][-1][0] else 'reverse'
 
         queue = [node_id]
         while len(queue) > 0:
@@ -334,42 +333,40 @@ class Server(object):
 
 
     def infer(self, data):
-        config = self.config
+        rows = process_ast(data)
 
-        rows = process_ast(data, lexicon={'ast':config['lexicon']})
-        rows = finish_row(rows, config['lexicon'])
+        for transitions in self.config['tests']:
+            for test in self.config['tests'][transitions]:
+                print(test, transitions)
+                test_conf = self.config['tests'][transitions][test]
+                transition = test_conf['transitions']
 
-        for test in config['lexicon']:
-            for i in range(len(data.nodes[test]['forward'])):
-                transition = data.nodes[test]['forward'][i]['transitions']
-                data.nodes[test]['forward'][i]['transitions_percentage'] = config['lexicon'][test]['transition_percentages'][transition] if transition in config['lexicon'][test]['transition_percentages'] else 0
+                lexicon = test_conf['lexicon']['token_to_index']
+                row = finish_row(rows[transition][test], lexicon)
+                data_dict = {}
+                for k in test_conf['features']:
+                    data_dict[test_conf['features'][k]] = [row[k]]
 
-        test = None
-        data_dict = {}
-        for k in config['features']:
-            data_dict[config['features'][k]] = [rows[test][k]]
+                test_conf['session'].run(test_conf['tensor_iter'], data_dict)
 
-        self.session.run(config['tensor_iter'], data_dict)
+                vals = test_conf['session'].run(test_conf['fetches'])
 
-        vals = self.session.run(config['fetches'])
-
-        nodes = data.nodes[test]['forward']
-        for i in range(len(nodes)):
-            nodes[i].update(self.gather_props(vals, data_dict, node=nodes[i]))
+                nodes = data.nodes[transition][test]['forward']
+                for i in range(len(nodes)):
+                    nodes[i].update(self.gather_props(vals, data_dict, test_conf, node=nodes[i]))
 
 
     def process_code(self, code):
         try:
-            ast_data, linear_data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
+            data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         except Exception as e:
             # TODO
             return {'error': "Couldn't parse code." + str(e)}
 
-        data = ast_data if self.config['model'] == 'ast' else linear_data
         self.data = data
 
         self.infer(data)
-        self.beam('dependency_configs', 'd2')
+        #self.beam('dependency_configs', 'd2')
 
         output = {
             'code': CGenerator(data).code,

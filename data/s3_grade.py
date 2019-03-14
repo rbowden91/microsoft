@@ -59,7 +59,7 @@ for problem in ['vigenere']:
         for key in tests:
             try:
                 # TODO: no dowhile
-                results, visited = run_tests(ast, tests[key])
+                results = run_tests(ast, tests[key])
             except InterpTooLong:
                 continue
 
@@ -76,6 +76,7 @@ for problem in ['vigenere']:
 
             for result in results:
                 if not result['passed']:
+                    print('failed', results)
                     break
             # passed all the tests
             else:

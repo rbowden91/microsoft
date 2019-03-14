@@ -191,9 +191,9 @@ class RNNTensorArrayCell():
             rnn.append(self.RNNWrapper(dependency, layer, is_last_layer, self.array))
             with tf.variable_scope(rnn[layer].scope):
                 # initial state
-                initial = { 'c': tf.get_variable('lstm_state_c' + str(layer) + dependency,
+                initial = { 'c': tf.get_variable('lstm_state_c',
                                         [1, self.array.hidden_size], self.array.data_type),
-                            'h': tf.get_variable('lstm_state_h' + str(layer) + dependency,
+                            'h': tf.get_variable('lstm_state_h',
                                         [1, self.array.hidden_size], self.array.data_type)}
                 rnn[layer].save_lstm_state(self.data, 0, tf.contrib.rnn.LSTMStateTuple(initial['c'],
                                                                                        initial['h']))
@@ -203,7 +203,7 @@ class RNNTensorArrayCell():
                     initials[key] = initial[i]
 
                 # theoretically, we may not need anything other than the last output, but save all layers anyway
-                initial_output = tf.get_variable('lstm_initial_output' + str(layer) + dependency,
+                initial_output = tf.get_variable('lstm_initial_output',
                                         [1, self.array.hidden_size], self.array.data_type)
 
                 rnn[layer].save_output(self.data, 0, initial_output)
@@ -211,7 +211,7 @@ class RNNTensorArrayCell():
                 fetches[key] =  lambda: rnn[layer].stack_output(self.data)
                 initials[key] = initial_output
                 if dependency == 'children' and is_last_layer:
-                    initial_child_output = tf.get_variable('lstm_initial_child_output' + str(layer) + dependency,
+                    initial_child_output = tf.get_variable('lstm_initial_child_output',
                                             [1, self.array.hidden_size], self.array.data_type)
                     rnn[layer].save_output(self.data, 0, initial_child_output, True)
                     key = 'child-outputs-' + str(layer)

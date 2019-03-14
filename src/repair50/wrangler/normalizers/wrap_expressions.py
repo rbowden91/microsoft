@@ -11,6 +11,7 @@ class WrapExpressions(ModifyingVisitor):
         for item in n.block_items:
             item = self.visit(item)
             if item is None: continue
+            # break? continue? goto? label?
             if item.__class__.__name__ in ['For', 'If', 'While', 'DoWhile', 'Compound', 'Break', 'Continue', 'Return', 'Goto', 'Label', 'Switch', 'Case', 'Default']:
                 items.append(ExpressionList(expressions))
                 expressions = []

@@ -6,6 +6,7 @@ import argparse
 import socket
 import selectors
 import traceback
+import time
 
 #from multiprocessing import Process, Queue
 from queue import Queue
@@ -25,25 +26,48 @@ parser.add_argument('-p', '--path', help='model output directory (default "tmp")
         default='/home/rbowden/repos/repair50/data/training_data/vig_no_decl10/ast/tmp')
 args = parser.parse_args()
 
+def send_json(sock, msg):
+    output = json.dumps(msg).encode('latin-1') + b'\n\n'
+    sleep_error = 0
+    while len(output) > 0 and sleep_error <= 10:
+        try:
+            sent = sock.send(output)
+            output = output[sent:]
+            sleep_error = 0
+        except:
+            sleep_error += 1
+            time.sleep(1)
+    return len(output) == 0
+
+
 
 def start_worker(q):
     server = Server(args.path)
     while True:
         sock, input_ = q.get()
+        print('Handling input')
         try:
             output = server.process_code(input_['code'])
+            output['session_id'] = input_['session_id']
+            props = output['props']
+            del(output['props'])
             output['success'] = True
         except Exception:
             traceback.print_exc()
+            props = {}
             output = {'success': False}
-        output = json.dumps(output).encode('latin-1') + b'\n\n'
-        while len(output) > 0:
-            try:
-                sent = sock.send(output)
-                output = output[sent:]
-            except:
-                pass
-
+        print('Sending code and test results')
+        if send_json(sock, output):
+            for k in props:
+                print('Sending prop ' + str(k))
+                output = {
+                    'success': True,
+                    'session_id': input_['session_id'],
+                    'props': {k : props[k]}
+                }
+                if not send_json(sock, output):
+                    break
+        print('Done sending output')
         q.task_done()
 
 
@@ -77,7 +101,11 @@ def main():
                 sock = key.fileobj
                 data = key.data
                 if mask & selectors.EVENT_READ:
-                    recv_data = sock.recv(4096)  # Should be ready to read
+                    try:
+                        recv_data = sock.recv(4096)  # Should be ready to read
+                    except:
+                        recv_data = None
+
                     if recv_data:
                         data['input'] += recv_data
                         input_ = data['input'].split(b'\n\n')
