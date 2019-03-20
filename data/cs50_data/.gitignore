@@ -2,4 +2,5 @@ s3_unsorted_downloads
 s3_sorted_psets
 s3_graded_psets
 tf_graded_psets
+training_data
 submissions_with_grades.tsv
