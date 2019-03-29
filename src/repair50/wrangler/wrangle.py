@@ -1,4 +1,5 @@
 import os, sys
+import collections
 from typing import List, Tuple
 from pycparser import c_parser, c_generator, c_lexer # type:ignore
 from ..preprocessor.external import ExternalCPP # type:ignore
@@ -6,65 +7,70 @@ from ..preprocessor.external import ExternalCPP # type:ignore
 from centipyde.interpreter import run_tests # type:ignore
 from .normalizers import normalize
 from .linearize_ast import WrangledAST
+from ..default_dict import data_dict
 
-def process_ast(ast, key=None, lexicon=None, transitions_groups=None, lock=None):
-    all_new_rows = {}
+def process_ast(ast, lexicon=None, transitions_groups=None, lock=None):
+    all_new_rows = data_dict(lambda: collections.defaultdict(list))
 
-    for transitions in ast.nodes:
-        all_new_rows[transitions] = {}
-        for test in ast.tests:
-            local_lexicon = {
-                'label': set(),
-                'attr': set(),
-                'transitions': set()
-            }
-            # skip the nil slot
-            ast.nodes[transitions][test]['reverse'].pop(0)
-            nodes = ast.nodes[transitions][test]['forward']
-            nodes.pop(0)
-            for i in range(len(nodes)):
-                data = nodes[i]
-                for j in ['attr', 'parent_attr', 'parent_label', 'transitions']:
-                    data[j] = data[j] if data[j] is not None else '<nil>'
+    for test in ast.nodes:
+        for root_node in list(ast.nodes[test].keys()):
+            for transitions in ast.nodes[test][root_node]:
+                local_lexicon = {
+                    'label': set(),
+                    'attr': set(),
+                    'transitions': set()
+                }
+                nodes_ = ast.nodes[test][root_node][transitions]
+                if not nodes_: continue
 
-                for j in ['label', 'attr', 'transitions']:
-                    if key == "train" and data[j] not in local_lexicon[j]:
-                        with lock:
-                            if data[j] not in lexicon[transitions][test][j]:
-                                lexicon[transitions][test][j][data[j]] = 0
-                            lexicon[transitions][test][j][data[j]] += 1
-                        local_lexicon[j].add(data[j])
 
-            all_new_rows[transitions][test] = new_rows = {}
-            for k in ['reverse', 'forward']:
-                nodes = ast.nodes[transitions][test][k]
-                for i in nodes[0]:
-                    if i == k:
-                        for j in nodes[0][i]:
-                            if j == 'pointers':
-                                for q in range(len(nodes[0][i][j]['memory'])):
-                                    # TODO: use sequence example instead or something?
-                                    new_rows['-'.join([k,j,'memory',str(q)])] = [n[i][j]['memory'][q] for n in nodes]
-                                    new_rows['-'.join([k,j,'mask',str(q)])] = [n[i][j]['mask'][q] for n in nodes]
+                root_transitions = ast.prop_map[root_node][test][root_node][transitions]['transitions']
+                new_row = all_new_rows[test][root_node][transitions]
+
+                for k in ['reverse', 'forward']:
+                    nodes = nodes_[k]
+                    # skip the nil slot
+                    nodes.pop(0)
+
+                    for node in nodes:
+                        for feature, val in node.items():
+                            if val is None:
+                                node[feature] = '<nil>'
+                            if lock and feature in local_lexicon and val not in local_lexicon[feature]:
+                                with lock:
+                                    lexicon[test][root_transitions][transitions][feature][val] += 1
+                                local_lexicon[feature].add(val)
+
+                            if feature not in ['forward', 'reverse']:
+                                new_row[k + '-' + feature].append(int(val) if isinstance(val, bool) else val)
                             else:
-                                new_rows['-'.join([i,j])] = [int(n[i][j]) if isinstance(n[i][j], bool) else n[i][j] for n in nodes]
-                    elif i in ['forward', 'reverse']: continue
-                    else:
-                        new_rows[k + '-' + i] = [int(n[i]) if isinstance(n[i], bool) else n[i] for n in nodes]
+                                if feature != k: continue
+                                for dep, dep_val in val.items():
+                                    if dep == 'pointers':
+                                        # FIXME: release limit of pointer memory of 20
+                                        if len(dep_val['memory']) < 20:
+                                            dep_val['memory'].extend([0] * (20 - len(dep_val['memory'])))
+                                            dep_val['mask'].extend([0] * (20 - len(dep_val['mask'])))
+                                        elif k == 'forward':
+                                            dep_val['memory'] = dep_val['memory'][-20:]
+                                            dep_val['mask'] = dep_val['mask'][-20:]
+                                        else:
+                                            dep_val['memory'] = dep_val['memory'][:20]
+                                            dep_val['mask'] = dep_val['mask'][:20]
 
-    if key == 'train':
+                                        for q in range(len(dep_val['memory'])):
+                                            # TODO: use sequence example instead or something?
+                                            new_row['-'.join([k,dep,'memory',str(q)])].append(dep_val['memory'][q])
+                                            new_row['-'.join([k,dep,'mask',str(q)])].append(dep_val['mask'][q])
+                                    else:
+                                        new_row['-'.join([k,dep])].append(int(dep_val) if isinstance(dep_val, bool) else dep_val)
+
+
+    if lock:
         for test in ast.transitions_groups:
-            if test not in transitions_groups:
-                transitions_groups[test] = {}
             for transition in ast.transitions_groups[test]:
-                if transition not in transitions_groups[test]:
-                    transitions_groups[test][transition] = {}
                 for test2 in ast.transitions_groups[test][transition]:
-                    if test2 not in transitions_groups[test][transition]:
-                        transitions_groups[test][transition][test2] = {}
                     for transition2 in ast.transitions_groups[test][transition][test2]:
-                        if transition2 not in transitions_groups[test][transition][test2]:
-                            transitions_groups[test][transition][test2][transition2] = 0
                         transitions_groups[test][transition][test2][transition2] += ast.transitions_groups[test][transition][test2][transition2]
 
     return all_new_rows
@@ -83,21 +89,29 @@ def tokens_to_ids(tokens, token_to_id, include_token):
         output.append((id, token) if include_token else id)
     return output
 
-def finish_row(row, lexicon):
+def finish_row(row, lexicon, root_lexicon):
     # all rows should have a forward label
     row_len = len(row['forward-label'])
 
     for i in ['forward-', 'reverse-']:
         for j in ['parent_', '']:
-            for k in ['label', 'attr', 'transitions']:
+            for k in ['label', 'attr', 'transitions', 'root_transitions']:
                 idx = i + j + k
                 if idx in row:
-                    row[idx + '_index'] = tokens_to_ids(row[idx], lexicon[k], False)
+                    if k == 'root_transitions':
+                        key = 'transitions'
+                        lex = root_lexicon
+                    else:
+                        key = k
+                        lex = lexicon
+
+                    row[idx + '_index'] = tokens_to_ids(row[idx], lex[key], False)
                     del(row[idx])
                 else:
                     row[idx + '_index'] = [0] * row_len
         # the nil slot is the only slot that's masked out, other than potential padded batches
         row[i + 'mask'] = [1] * row_len
+
     del(row['forward-snapshots'])
     del(row['reverse-snapshots'])
 

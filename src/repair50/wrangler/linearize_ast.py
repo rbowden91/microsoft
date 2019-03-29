@@ -1,13 +1,55 @@
 import sys
-from copy import deepcopy
+import collections
+from ..default_dict import data_dict
 from pycparser import c_ast # type:ignore
 
 transition_classes = ['FileAST', 'FuncDef', 'Compound', 'ExpressionList', 'If', 'For', 'While', 'DoWhile', 'Switch', 'Case', 'Default']
 
+default_dependencies = lambda: {
+    'pointers': {'memory': [], 'mask': []},
+    'self': 0,
+    'parent': 0,
+    'left_sibling': 0,
+    'left_hole': 0,
+    'left_prior': 0,
+    'left_child': 0,
+    'right_hole': 0,
+    'right_sibling': 0,
+    'right_prior': 0,
+    'right_child': 0,
+}
+
+default_props = lambda: {
+    'label': None,
+    'first_sibling': True,
+    'num_children': 0,
+    'is_leaf': True,
+    'attr': None,
+    'snapshots': [],
+    'transitions': None,
+
+    # this is the only dependency we need for the TreeLSTMs
+    'parent_transitions': None,
+    'parent_label': None,
+    'parent_attr': None,
+
+    'forward': default_dependencies(),
+    'reverse': default_dependencies()
+}
+
+# ancestor -> transitions -> test -> key -> 0
+nodes_list = lambda: { 'forward': [default_props()],
+                       'reverse': [default_props()] }
+
+arg_dict = lambda: data_dict(lambda: collections.defaultdict(int, nodes=nodes_list(), pointers=[])) #type:ignore
+
 
 def canonicalize_snapshots(node, test):
+    if node.__class__.__name__ == 'FileAST': return '<nil>'
+
     if 'snapshots' not in node.node_properties or test not in node.node_properties['snapshots']:
-        return None
+        return '<unk>'
+
 
     transitions = []
     for snap in node.node_properties['snapshots'][test]:
@@ -31,173 +73,137 @@ def canonicalize_snapshots(node, test):
 
 
 class WrangledAST(object):
+
     def __init__(self, ast, results):
         self.ast = ast
         self.results = results
         self.prop_map = {}
-        self.tests = set()
+        self.tests = set(['null'])
         self.num_nodes = 1
 
         for result in results:
             self.tests.add(result['name'])
-        self.tests.add('null')
 
-        nil_props = {'label': None, 'attr': None, 'transitions': None,
-                'forward':{'self': 0, 'left_child': 0}, 'reverse':{'self': 0, 'right_child': 0}}
-
-        self.hole = {}
-        self.nodes = {}
-        self.pointer_memory = {}
-        for transitions in [False, True]:
-            self.hole[transitions] = {}
-            self.nodes[transitions] = {}
-            self.pointer_memory[transitions] = {}
-            for test in self.tests:
-                self.hole[transitions][test] = 0
-                self.nodes[transitions][test] = { 'forward': [nil_props], 'reverse': [nil_props] }
-                self.pointer_memory[transitions][test] = []
         self.generic_visit()
+        self.transitions_groups = collections.defaultdict(lambda: collections.defaultdict(lambda:
+            collections.defaultdict(lambda: collections.defaultdict(int))))
+        self.get_transitions_groups(ast, ast.node_properties['node_num'])
 
-        self.transitions_groups = {test: {} for test in self.tests}
-        self.get_transitions_groups(ast)
+    def update_args(self, args, args_update):
+        for test in args_update:
+            for ancestor in args_update[test]:
+                for transitions in args_update[test][ancestor]:
+                    args[test][ancestor][transitions].update(args_update[test][ancestor][transitions])
 
-        self.transitions_trees = []
-
-    def get_transitions_groups(self, node):
+    def get_transitions_groups(self, node, ast_node_num):
         if node.__class__.__name__ == 'NodeWrapper':
-            return self.get_transitions_groups(node.new) if node.new is not None else None
+            return self.get_transitions_groups(node.new, ast_node_num) if node.new is not None else None
+
         for test in self.tests:
-            transitions = node.node_properties['props'][True][test]
+            transitions = node.node_properties['props'][test][ast_node_num][True]
             if transitions:
-                transitions = transitions['transitions']
-            if transitions not in self.transitions_groups[test]:
-                self.transitions_groups[test][transitions] = {}
-            tg = self.transitions_groups[test][transitions]
-            for test2 in self.tests:
-                transitions2 = node.node_properties['props'][True][test2]
-                if transitions2:
-                    transitions2 = transitions2['transitions']
-                if test2 not in tg:
-                    tg[test2] = {}
-                if transitions2 not in tg:
-                    tg[test2][transitions2] = 0
-                tg[test2][transitions2] += 1
+                tg = self.transitions_groups[test][transitions['transitions']]
+                for test2 in self.tests:
+                    transitions2 = node.node_properties['props'][test2][ast_node_num][True]
+                    if transitions2:
+                        tg[test2][transitions2['transitions']] += 1
 
         children = node.children()
         for i in range(len(children)):
-            self.get_transitions_groups(children[i][1])
+            self.get_transitions_groups(children[i][1], ast_node_num)
 
+    # This is currently O(n^2)
+    def handle_pointers(self, args):
+        for test in args:
+            for ancestor in args[test]:
+                ancestor_node_num = ancestor.node_properties['node_num']
+                for transitions in args[test][ancestor]:
+                    pointers = args[test][ancestor][transitions]['pointers']
+                    for node in pointers:
+                        props = node.node_properties['props'][test][ancestor_node_num][transitions]
+                        for node2 in pointers:
+                            if node == node2: continue
+                            props2 = node2.node_properties['props'][test][ancestor_node_num][transitions]
+                            direction = 'forward' if node.node_properties['node_num'] < node2.node_properties['node_num'] else 'reverse'
+                            props[direction]['pointers']['mask'].append(1 if node2 in node.node_properties['pointers'] else 0)
+                            props[direction]['pointers']['memory'].append(props2[direction]['self'])
 
-    def handle_pointers(self, node, direction, transitions, test):
-        props = node.node_properties['props'][transitions][test]
-
-        pointers = []
-        if 'pointers' in node.node_properties:
-            for n in node.node_properties['pointers']:
-                # TODO: for some reason, a node is encountered more than once???
-                if isinstance(n, int):
-                    return
-                # removed typedecls and what not
-                if 'props' in n.node_properties and \
-                        n.node_properties['props'][transitions][test] and \
-                        direction in n.node_properties['props'][transitions][test] and \
-                        n.node_properties['props'][transitions][test][direction]['self'] != 0 and \
-                        n != node:
-                    pointers.append(n.node_properties['props'][transitions][test][direction]['self'])
-        props[direction]['pointers']['ids'] = pointers
-
-        # TODO: filter by scope???
-        if props['attr'] == 'LOCAL_ID':
-            props[direction]['pointers']['memory'] = deepcopy(self.pointer_memory[transitions][test])
-            props[direction]['pointers']['mask'] = [(1 if pointer in props[direction]['pointers']['ids'] else 0) for pointer in props[direction]['pointers']['memory']]
-            #self.pointer_memory.pop()
-            self.pointer_memory[transitions][test].insert(0, props[direction]['self'])
-
-        if 'pointers' in node.node_properties and direction == 'reverse' and not transitions:
-            node.node_properties['pointers'] = [n.node_properties['node_num'] for n in node.node_properties['pointers'] if 'node_num' in n.node_properties]
-
-    def generic_visit_reverse(self, node):
+    def generic_visit_reverse(self, node, args, transitions_ancestry):
         className = node.__class__.__name__
         if className == 'NodeWrapper':
-            return self.generic_visit_reverse(node.new) if node.new is not None else \
-                    { transitions: {test: False for test in self.tests} for transitions in [True, False] }
+            return self.generic_visit_reverse(node.new, args, transitions_ancestry) \
+                   if node.new is not None else None
 
-        ret = {}
+        if className in transition_classes:
+            transitions_ancestry.insert(0, node)
+            idx = 2
+        else:
+            idx = 1
 
-        for transitions in [True, False]:
-            ret[transitions] = {}
-            for test in self.tests:
-                props = node.node_properties['props'][transitions][test]
-                if not props:
-                    ret[transitions][test] = False
-                    continue
 
-                my_node_num = len(self.nodes[transitions][test]['reverse'])
-                props['reverse'] = {
-                    'self': my_node_num,
-                    'parent': self.nodes[transitions][test]['forward'][props['forward']['parent']]['reverse']['self'],
-                    'right_sibling': self.nodes[transitions][test]['forward'][props['forward']['right_sibling']]['reverse']['self'],
-                    'right_prior': my_node_num - 1,
-                    'right_hole': self.hole[transitions][test],
+        update_args = arg_dict()
+        for test in args:
+            for ancestor in (transitions_ancestry[:idx] if test != 'null' else [self.ast]):
+                ancestor_node_num = ancestor.node_properties['node_num']
+                for transitions in args[test][ancestor]:
+                    props = node.node_properties['props'][test][ancestor_node_num][transitions]
+                    if not props:
+                        continue
 
-                    'pointers': {'memory': [], 'mask': []},
-                    # these are all set by the relevant dependency if they exist
-                    'left_hole': 0,
-                    'left_child': 0,
-                    'left_sibling': 0,
-                    'left_prior': 0,
-                    'right_child': 0,
-                }
-                props['last_sibling'] = props['forward']['right_sibling'] == 0
+                    arg = args[test][ancestor][transitions]
+                    up_arg = args[test][ancestor][transitions]
+                    fprops = props['forward']
+                    fnodes = arg['nodes']['forward']
+                    rnodes = arg['nodes']['reverse']
 
-                self.nodes[transitions][test]['reverse'].append(props)
+                    my_node_num = len(rnodes)
+                    props['reverse'].update({
+                        'self': my_node_num,
+                        'parent': fnodes[fprops['parent']]['reverse']['self'],
+                        'right_sibling': fnodes[fprops['right_sibling']]['reverse']['self'],
+                        'right_prior': my_node_num - 1,
+                        'right_hole': arg['right_hole'],
+                    })
+                    props['last_sibling'] = fprops['right_sibling'] == 0
+                    rnodes.append(props)
 
-                if self.nodes[transitions][test]['reverse'][props['reverse']['parent']]['reverse']['right_child'] == 0:
-                    self.nodes[transitions][test]['reverse'][props['reverse']['parent']]['reverse']['right_child'] = my_node_num
-                self.nodes[transitions][test]['reverse'][props['reverse']['parent']]['reverse']['left_child'] = my_node_num
-                self.nodes[transitions][test]['forward'][props['forward']['right_sibling']]['reverse']['left_sibling'] = my_node_num
-                self.nodes[transitions][test]['reverse'][my_node_num-1]['reverse']['left_prior'] = my_node_num
+                    rprops = props['reverse']
 
-                self.handle_pointers(node, 'reverse', transitions, test)
-                ret[transitions][test] = node
+
+                    if rnodes[rprops['parent']]['reverse']['right_child'] == 0:
+                        rnodes[rprops['parent']]['reverse']['right_child'] = my_node_num
+                    rnodes[rprops['parent']]['reverse']['left_child'] = my_node_num
+                    fnodes[fprops['right_sibling']]['reverse']['left_sibling'] = my_node_num
+                    rnodes[my_node_num-1]['reverse']['left_prior'] = my_node_num
+                    fprops['right_hole'] = rnodes[rprops['right_hole']]['forward']['self']
+                    # TODO: fix this
+                    #props['reverse']['left_hole'] = self.nodes[test]['forward'][props['forward']['left_hole']]['reverse']['self']
+                    #rprops['left_hole'] = fnodes[fprops['left_hole']]['reverse']['self']
+
+                    arg['right_sibling'] = 0
+                    up_arg['right_hole'] = my_node_num
+                    up_arg['right_sibling'] = my_node_num
+
+        if 'pointers' in node.node_properties:
+            node.node_properties['pointer_ids'] = [n.node_properties['node_num'] for n in node.node_properties['pointers'] if 'node_num' in n.node_properties]
 
         children = node.children()
         for i in range(len(children)-1, -1, -1):
-            child_ret = self.generic_visit_reverse(children[i][1])
-            for transitions in child_ret:
-                for test in self.tests:
-                    if child_ret[transitions][test]:
-                        self.hole[transitions][test] = child_ret[transitions][test].node_properties['props'][transitions][test]['reverse']['self']
+            self.generic_visit_reverse(children[i][1], args, transitions_ancestry)
 
-        for transitions in node.node_properties['props']:
-            for test in self.tests:
-                props = node.node_properties['props'][transitions][test]
-                if props:
-                    props['forward']['right_hole'] = self.nodes[transitions][test]['reverse'][props['reverse']['right_hole']]['forward']['self']
-                    # TODO: fix this!
-                    #props['reverse']['left_hole'] = self.nodes[test]['forward'][props['forward']['left_hole']]['reverse']['self']
+        # cleanup/setup for next node
+        self.update_args(args, update_args)
 
-        return ret
+        if className in transition_classes:
+            transitions_ancestry.pop(0)
 
 
 
-
-    def generic_visit_forward(self, node, parent, left_sibling, transitions_ancestry):
-        className = node.__class__.__name__
-        if className == 'NodeWrapper':
-            return self.generic_visit_forward(node.new, parent, left_sibling, transitions_ancestry) \
-                    if node.new is not None else \
-                    { transitions: {test: False for test in self.tests} for transitions in [True, False] }
-
-        node.node_properties['props'] = {True: {}, False: {}}
-        node.node_properties['node_num'] = self.num_nodes
-        self.num_nodes += 1
-        self.prop_map[node.node_properties['node_num']] = node.node_properties['props']
-
+    def get_attr(self, node):
         # strongly assumes there is at most one attribute we care about
         nvlist = [(n, getattr(node, n)) for n in node.attr_names]
         if 'replace_name' in node.node_properties:
-            attr = node.node_properties['replace_name']
+            return node.node_properties['replace_name']
         else:
             attr = None
             for (name, val) in nvlist:
@@ -208,109 +214,119 @@ class WrangledAST(object):
                 else:
                     #print(name, val)
                     pass
-        ret = {}
-        new_parent = {}
-        new_left_sibling = {}
-        new_transitions_ancestry = {}
+            return attr
 
-        for transitions in [True, False]:
-            ret[transitions] = {}
-            new_left_sibling[transitions] = {}
-            new_parent[transitions] = {}
-            new_transitions_ancestry[transitions] = {}
 
-            for test in self.tests:
+    def generic_visit_forward(self, node, args, transitions_ancestry):
+        className = node.__class__.__name__
+        if className == 'NodeWrapper':
+            return self.generic_visit_forward(node.new, args, transitions_ancestry) \
+                    if node.new is not None else None
 
-                if (transitions and className not in transition_classes) or \
-                    (test != 'null' and className not in ['FileAST', 'FuncDef'] and (parent[transitions][test] is False or 'visited' not in node.node_properties or test not in node.node_properties['visited'])):
-                    ret[transitions][test] = False
-                    new_left_sibling[transitions][test] = False
-                    new_parent[transitions][test] = False
-                    new_transitions_ancestry[transitions][test] = False
-                    node.node_properties['props'][transitions][test] = False
-                    continue
+        nprops = node.node_properties
+        nprops['node_num'] = self.num_nodes
+        self.num_nodes += 1
+        self.prop_map[nprops['node_num']] = nprops['props'] = \
+            collections.defaultdict(lambda: collections.defaultdict(lambda:
+                    collections.defaultdict(lambda: False)))
 
-                nodes = self.nodes[transitions][test]['forward']
-                my_node_num = len(nodes)
+        attr = self.get_attr(node)
 
-                transitions_ancestry[transitions][test].
+        # we don't want the subtree from every node.
+        # only from transition-relevant nodes (for loops, compounds, etc.)
+        if className in transition_classes:
+            transitions_ancestry.insert(0, node)
+            idx = 2
+        else:
+            idx = 1
 
-                my_transition = canonicalize_snapshots(node, test)
-                if className in transition_classes:
-                    transitions_ancestry[transitions][test].append(my_transition)
+        update_args = arg_dict()
+        for test in self.tests:
+            for ancestor in (transitions_ancestry[:idx] if test != 'null' else [self.ast]):
+                ancestor_node_num = ancestor.node_properties['node_num']
+                for transitions in [True, False]:
+                    arg = args[test][ancestor][transitions]
+                    up_arg = update_args[test][ancestor][transitions] = {'parent': arg['parent']}
 
-                props = {
-                    'label': node.__class__.__name__,
-                    'first_sibling': left_sibling[transitions][test] == 0,
-                    'num_children': 0,
-                    'is_leaf': True,
-                    'attr': attr,
-                    'snapshots':  node.node_properties['snapshots'][test] if 'snapshots' in node.node_properties and test in node.node_properties['snapshots'] else [],
-                    'transitions': canonicalize_snapshots(node, test),
-                    'transitions_subtree': transitions_ancestry[transitions][test],
+                    if (transitions and className not in transition_classes) or \
+                        (test != 'null' and className not in ['FileAST', 'FuncDef'] and
+                        (arg['parent'] is False or \
+                            'visited' not in nprops or test not in nprops['visited'])):
+                        arg['parent'] = False
+                        continue
 
-                    # this is the only dependency we need for the TreeLSTMs
-                    'parent_transitions': nodes[parent[transitions][test]]['transitions'],
-                    'parent_label': nodes[parent[transitions][test]]['label'],
-                    'parent_attr': nodes[parent[transitions][test]]['attr'],
+                    nodes = arg['nodes']['forward']
+                    my_node_num = len(nodes)
 
-                    'forward': {
-                        'pointers': {'memory': [], 'mask': []},
+                    parent_idx = arg['parent']
+                    parent_node = nodes[parent_idx]
+                    left_idx = arg['left_sibling']
+                    left_node = nodes[left_idx]
+
+                    nprops['props'][test][ancestor_node_num][transitions] = props = default_props()
+
+                    props['forward'].update({
                         'self': my_node_num,
-                        'parent': parent[transitions][test],
-                        'left_sibling': left_sibling[transitions][test],
-                        'left_hole': self.hole[transitions][test],
+                        'parent': parent_idx,
+                        'left_sibling': left_idx,
+                        'left_hole': arg['left_hole'],
                         'left_prior': my_node_num - 1,
-                        # these are all set by the relevant dependency if they exist
-                        'left_child': 0,
-                        'right_hole': 0,
-                        'right_sibling': 0,
-                        'right_prior': 0,
-                        'right_child': 0,
-                    }
-                }
+                    })
+                    props.update({
+                        'label': className,
+                        'first_sibling': left_idx == 0,
+                        'attr': attr,
+                        'snapshots':  nprops['snapshots'][test] if 'snapshots' in nprops and test in nprops['snapshots'] else [],
+                        'root_transitions': canonicalize_snapshots(ancestor, test),
+                        'transitions': canonicalize_snapshots(node, test),
+                        'parent_transitions': parent_node['transitions'],
+                        'parent_label': parent_node['label'],
+                        'parent_attr': parent_node['attr'],
+                    })
 
-                nodes.append(props)
-                node.node_properties['props'][transitions][test] = props
+                    nodes.append(props)
 
-                if nodes[parent[transitions][test]]['forward']['left_child'] == 0:
-                    nodes[parent[transitions][test]]['forward']['left_child'] = my_node_num
+                    if parent_node['forward']['left_child'] == 0:
+                        parent_node['forward']['left_child'] = my_node_num
 
-                nodes[parent[transitions][test]]['forward']['right_child'] = my_node_num
-                nodes[left_sibling[transitions][test]]['forward']['right_sibling'] = my_node_num
-                nodes[my_node_num - 1]['forward']['right_prior'] = my_node_num
+                    parent_node['forward']['right_child'] = my_node_num
+                    parent_node['num_children'] += 1
+                    parent_node['is_leaf'] = False
+                    left_node['forward']['right_sibling'] = my_node_num
+                    nodes[my_node_num - 1]['forward']['right_prior'] = my_node_num
 
-                self.handle_pointers(node, 'forward', transitions, test)
+                    arg['parent'] = my_node_num
+                    arg['left_sibling'] = 0
+                    up_arg['left_sibling'] = my_node_num
+                    up_arg['left_hole'] = my_node_num
 
-                new_parent[transitions][test] = my_node_num
-                new_left_sibling[transitions][test] = 0
-                ret[transitions][test] = node
+                    if props['attr'] == 'LOCAL_ID' and 'pointers' in node.node_properties:
+                        arg['pointers'].append(node)
 
         children = node.children()
         for i in range(len(children)):
-            child_ret = self.generic_visit_forward(children[i][1], new_parent, new_left_sibling)
-            for transitions in child_ret:
-                for test in child_ret[transitions]:
-                    if child_ret[transitions][test]:
-                        new_left_sibling[transitions][test] = self.hole[transitions][test] = child_ret[transitions][test].node_properties['props'][transitions][test]['forward']['self']
-                        node.node_properties['props'][transitions][test]['num_children'] += 1
-                        node.node_properties['props'][transitions][test]['is_leaf'] = False
+            self.generic_visit_forward(children[i][1], args, transitions_ancestry)
 
+        # cleanup/setup for next node
+        self.update_args(args, update_args)
 
-        return ret
-
+        if className in transition_classes:
+            transitions_ancestry.pop(0)
 
     def generic_visit(self):
-        parent = { transitions: {test: 0 for test in self.tests} for transitions in [True, False] }
-        left_sibling = { transitions: {test: 0 for test in self.tests} for transitions in [True, False] }
-        self.generic_visit_forward(self.ast, parent, left_sibling)
-        for transitions in self.hole:
-            for test in self.hole[transitions]:
-                    self.hole[transitions][test] = 0
-                    self.pointer_memory[transitions][test] = []
-        self.generic_visit_reverse(self.ast)
-        # delete the nil slot
-        for transitions in self.nodes:
-            for test in self.nodes[transitions]:
-                self.nodes[transitions][test]['forward'][0] = None
-                self.nodes[transitions][test]['reverse'][0] = None
+        args = arg_dict()
+        self.generic_visit_forward(self.ast, args, [])
+        self.generic_visit_reverse(self.ast, args, [])
+        self.handle_pointers(args)
+
+        self.nodes = data_dict(lambda: False)
+        for test in args:
+            for ancestor in args[test]:
+                ancestor_node_num = ancestor.node_properties['node_num']
+                for transitions in args[test][ancestor]:
+                    if transitions and test == 'null': continue
+                    arg = args[test][ancestor][transitions]['nodes']
+                    # just the root and the nil slot
+                    if len(arg['forward']) <= 2: continue
+                    arg['forward'][0] = arg['reverse'][0] = None
+                    self.nodes[test][ancestor_node_num][transitions] = arg

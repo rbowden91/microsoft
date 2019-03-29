@@ -121,9 +121,9 @@ class TRNNBaseModel(object):
         placeholders['filename'] = tf.placeholder(tf.string, [], name='filename_placeholder')
         dataset = tf.data.TFRecordDataset(placeholders['filename'])
         dataset = dataset.map(parse_function) \
-                         .shuffle(buffer_size=100) \
-                         .repeat() \
                          .padded_batch(batch_size, parse_shapes)
+                         #.repeat() \
+                         #.shuffle(buffer_size=100) \
                          #.cache() \
         iter_ops['file_iter'] = iterator.make_initializer(dataset)
 
@@ -135,7 +135,8 @@ class TRNNBaseModel(object):
         self.dconfig = dconfig
         self.transitions = transitions
         for k in ['label_size', 'attr_size', 'transitions_size', 'hidden_size', 'features', 'num_layers', 'max_grad_norm']:
-            setattr(self, k, config[k])
+            if k in config:
+                setattr(self, k, config[k])
         self.mem_size = 20
 
         # grab the current scope, in case the model was instantiated within a scope
@@ -173,9 +174,9 @@ class TRNNBaseModel(object):
                 rows = {}
                 for k in self.rows:
                     self.reconstruct_example(self.rows[k], rows, k.split('-'))
-                #for i in ['forward', 'reverse']:
-                #    for j in ['memory', 'mask']:
-                #        rows[i]['pointers'][j] = e.rearrange(rows[i]['pointers'][j], 'm b n -> b n m');
+                for i in ['forward', 'reverse']:
+                    for j in ['memory', 'mask']:
+                        rows[i]['pointers'][j] = e.rearrange(rows[i]['pointers'][j], 'm b n -> b n m');
             self.rows = rows
 
             # num_rows does not always equal batch size, if we got a small batch
@@ -325,34 +326,35 @@ class TRNNModel(TRNNBaseModel):
             labels[end] = tf.cast(rows[end], data_type())
 
             # hpred: shape = [batch, nodes, hidden_size]
-            #self.rows[direction]['pointers']['memory']: shape = [batch, nodes, mem_size]
-            ## elems: shape = [batch, nodes, (hidden_size + mem_size)]
-            #elems = tf.concat([h_pred, tf.cast(rows['pointers']['memory'], tf.float32)], axis=2)
+            # self.rows[direction]['pointers']['memory']: shape = [batch, nodes, mem_size]
+            # elems: shape = [batch, nodes, (hidden_size + mem_size)]
+            elems = tf.concat([h_pred, tf.cast(rows['pointers']['memory'], tf.float32)], axis=2)
 
-            #def pointer_map(elems):
-            #    h_pred = elems[:,:self.hidden_size]
-            #    mem = tf.cast(elems[:,self.hidden_size:], tf.int32)
-            #    return tf.gather(h_pred, mem)
+            def pointer_map(elems):
+                h_pred = elems[:,:self.hidden_size]
+                mem = tf.cast(elems[:,self.hidden_size:], tf.int32)
+                return tf.gather(h_pred, mem)
 
 
-            ## shape = [batch, nodes, mem, size]
-            #pointers = tf.map_fn(pointer_map, elems)
+            # shape = [batch, nodes, mem, size]
+            pointers = tf.map_fn(pointer_map, elems)
 
-            ## tensordot generalizes matrix multiplication over batch_size and num_nodes
-            #w1 = tf.tensordot(pointers, p['pointers_w1'], [[3],[0]])
-            #w2 = tf.tensordot(h_pred, p['pointers_w2'], [[2],[0]])
-            #w2 = tf.reshape(w2, [self.num_rows, self.data_length, self.mem_size, self.hidden_size])
-            #scores = tf.reduce_sum(p['pointers_v'] * tf.tanh(w1 + w2) + p['pointers_b'], axis=3)
-            ## TODO: this is hackishly inserted
-            #self.pointer_mask = tf.not_equal(rows['pointers']['memory'], 0)
-            #logits['pointers'] = scores
-            #labels['pointers'] = tf.cast(rows['pointers']['mask'], data_type())
+            # tensordot generalizes matrix multiplication over batch_size and num_nodes
+            w1 = tf.tensordot(pointers, p['pointers_w1'], [[3],[0]])
+            w2 = tf.tensordot(h_pred, p['pointers_w2'], [[2],[0]])
+            w2 = tf.reshape(w2, [self.num_rows, self.data_length, self.mem_size, self.hidden_size])
+            scores = tf.reduce_sum(p['pointers_v'] * tf.tanh(w1 + w2) + p['pointers_b'], axis=3)
+            # TODO: this is hackishly inserted
+            self.pointer_mask = tf.not_equal(rows['pointers']['memory'], 0)
+            logits['pointers'] = scores
+            labels['pointers'] = tf.cast(rows['pointers']['mask'], data_type())
 
 
         return labels, logits
 
     @define_scope
     def embed(self, index, direction, parent=False):
+
         if self.transitions:
             transitions_index = self.rows[direction]['transitions_index' if not parent else 'parent_transitions_index'][:,index]
             return tf.gather(self.params['transitions_embed'], transitions_index, name="TransitionsEmbedGather", axis=0)
@@ -360,20 +362,15 @@ class TRNNModel(TRNNBaseModel):
             label_index = self.rows[direction]['label_index' if not parent else 'parent_label_index'][:,index]
             attr_index = self.rows[direction]['attr_index' if not parent else 'parent_attr_index'][:,index]
 
-            node_label_embedding = tf.gather(self.params['label_embed'], label_index, name="LabelEmbedGather", axis=0)
-            node_attr_embedding = tf.gather(self.params['attr_embed'], attr_index, name="AttrEmbedGather", axis=0)
-            node_embedding = tf.concat([node_label_embedding, node_attr_embedding], 1)
-        return node_embedding
+            label_embedding = tf.gather(self.params['label_embed'], label_index, name="LabelEmbedGather", axis=0)
+            attr_embedding = tf.gather(self.params['attr_embed'], attr_index, name="AttrEmbedGather", axis=0)
+            embeddings = [label_embedding, attr_embedding]
+            return tf.concat(embeddings, 1)
 
     @define_scope
     def declare_params(self):
         # declare a bunch of parameters that will be reused later. doesn't actually do anything
         size = self.hidden_size
-        label_size = self.label_size
-        transitions_size = self.transitions_size
-        attr_size = self.attr_size
-        embed_size = size / 2
-
         params = {}
 
         all_dependencies = set()
@@ -381,17 +378,22 @@ class TRNNModel(TRNNBaseModel):
             for dependency in dependencies:
                 all_dependencies.add(dependency)
 
+
         if self.transitions:
+            transitions_size = self.transitions_size
             params['u_end'] = tf.get_variable('u_end', [transitions_size, size], dtype=data_type())
             params['transitions_w'] = tf.get_variable("transitions_w", [1, size, transitions_size], dtype=data_type())
             params['transitions_b'] = tf.get_variable("transitions_b", [1, transitions_size], dtype=data_type())
-            params['transitions_embed'] = tf.get_variable("transitions_embedding", [transitions_size, size], dtype=data_type())
+            params['transitions_embed'] = tf.get_variable("transitions_embedding", [transitions_size, size / 2], dtype=data_type())
         else:
+            label_size = self.label_size
+            attr_size = self.attr_size
+            embed_size = size / 2
+
             params['u_end'] = tf.get_variable('u_end', [label_size, attr_size, size], dtype=data_type())
 
             params['attr_w'] = tf.get_variable("attr_w", [label_size, size, attr_size], dtype=data_type())
             params['attr_b'] = tf.get_variable("attr_b", [label_size, attr_size], dtype=data_type())
-            #params['attr_v'] = tf.get_variable("attr_v", [label_size, attr_size], dtype=data_type())
 
             params['label_w'] = tf.get_variable("label_w", [1, size, label_size], dtype=data_type())
             params['label_b'] = tf.get_variable("label_b", [1, label_size], dtype=data_type())
@@ -418,14 +420,6 @@ class TRNNModel(TRNNBaseModel):
 
         self.cells = RNNTensorArrayCell(all_dependencies, self.data_length, size, self.num_rows,
                                                     self.num_layers, data_type())
-
-        # TODO ROB: how to splice these into the tensorarray?
-        #for d in all_dependencies:
-        #    for layer in range(self.num_layers):
-        #        for i in range(self.num_rows, inference_stop):
-        #            self.cells.data[d][l].save_lstm_state(state, i)
-        #            self.cells.data[d][l].save_output(output, i)
-        #self.cells.data[dependency][num_layers] = {state, output}
 
         return params
 

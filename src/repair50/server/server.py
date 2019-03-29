@@ -7,11 +7,11 @@ import numpy as np # type:ignore
 import tensorflow as tf #type:ignore
 import collections
 
+from ..default_dict import data_dict
 from ..model.config import joint_configs, dependency_configs, valid_dependencies #type:ignore
 from ..wrangler.wrangle import finish_row, wrangle, process_ast #type:ignore
 from .c_generator import CGenerator
 
-nested_dict = lambda: collections.defaultdict(nested_dict) #type:ignore
 
 
 #import check_correct
@@ -94,54 +94,32 @@ class Server(object):
         with open(os.path.join(data_path, 'config.json')) as f:
             self.config = json.load(f)
 
-        for transitions in self.config['tests']:
-            for test in self.config['tests'][transitions]:
-                best_dir = os.path.join(data_path, 'best')
-                with open(self.config['tests'][transitions][test]['model_config_file'], 'r') as f:
-                    self.config['tests'][transitions][test] = test_conf = json.load(f)
+        self.test_conf = data_dict(lambda: False) #type:ignore
+        root_file = os.path.join(data_path, 'config.json')
+        with open(root_file, 'r') as f:
+            self.root_config = json.load(f)
+        for test in self.config['tests']:
+            for root_idx in self.config['tests'][test]:
+                for transitions in self.config['tests'][test][root_idx]:
+                    model_file = os.path.join(data_path, 'tests', test, root_idx, transitions, 'best', 'config.json')
+                    if not os.path.isfile(model_file): continue
+                    print('Loading model {} {} {}'.format(test, root_idx, transitions))
+                    with open(model_file, 'r') as f:
+                        self.test_conf[test][root_idx][transitions] = test_conf = json.load(f)
+                    self.dependency_configs = [dc for dc in test_conf['initials']['dependency_configs']]
 
-                # we have to find the model that we can feed...
-                test_conf['fetches'] = fetches = {} # type: ignore
-                test_conf['initials'] = initials = {} # type: ignore
-                for d in test_conf['models']:
-                    fetches[d] = {}
-                    initials[d] = {}
-                    for i in test_conf['models'][d]:
-                        fetches[d][i] = test_conf['models'][d][i]['fetches']
-                        initials[d][i] = test_conf['models'][d][i]['initials']
-
-                        for j in test_conf['models'][d][i]['placeholders']:
-                            if 'features' == j:
-                                test_conf['features'] = test_conf['models'][d][i]['placeholders'][j]
-                                test_conf['tensor_iter'] = test_conf['models'][d][i]['ops']['tensor_iter']
-
-                assert 'features' in test_conf
-
-                test_conf['graph'] = tf.Graph()
-                with test_conf['graph'].as_default():
-                    saver = tf.train.import_meta_graph(os.path.join(test_conf['best_dir'], "model.meta"))
-                    test_conf['session'] = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 0}))
-                    saver.restore(test_conf['session'], os.path.join(test_conf['best_dir'], 'model'))
-
-                initial_vals = test_conf['session'].run(test_conf['initials'])
-                test_conf['cells'] = {} # type:ignore
-                for dconfig in initial_vals:
-                    test_conf['cells'][dconfig] = {}
-                    for cdependency in initial_vals[dconfig]:
-                        test_conf['cells'][dconfig][cdependency] = {}
-                        for dependency in initial_vals[dconfig][cdependency]:
-                            test_conf['cells'][dconfig][cdependency][dependency] = {}
-                            for k in initial_vals[dconfig][cdependency][dependency]:
-                                test_conf['cells'][dconfig][cdependency][dependency][k] = {
-                                        0: { 0: { 0: initial_vals[dconfig][cdependency][dependency][k][0] } }
-                                }
+                    test_conf['graph'] = tf.Graph()
+                    with test_conf['graph'].as_default():
+                        saver = tf.train.import_meta_graph(os.path.join(test_conf['best_dir'], "model.meta"))
+                        test_conf['session'] = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 0}))
+                        saver.restore(test_conf['session'], os.path.join(test_conf['best_dir'], 'model'))
 
         print('Server initialized')
 
-    def gather_props(self, vals, data_dict, config, node_id=None, node=None):
-        revlex = config['lexicon']['index_to_token']
-        lex = config['lexicon']['token_to_index']
-        prop = nested_dict()
+    def gather_props(self, vals, data_dict, config, lexicon, node_id=None, node=None):
+        revlex = lexicon['index_to_token']
+        lex = lexicon['token_to_index']
+        prop = collections.defaultdict(lambda: collections.defaultdict(lambda: {}))
 
         for dconfig in vals:
             for cdependency in vals[dconfig]:
@@ -156,7 +134,7 @@ class Server(object):
                 if node_id is None:
                     node_id = idx
 
-                if config['transitions']:
+                if config['transitions'] == 'true':
                     token_target = data_dict[config['features'][direction + '-transitions_index']][0][idx]
                 else:
                     token_target = data_dict[config['features'][direction + '-label_index']][0][idx]
@@ -169,7 +147,6 @@ class Server(object):
                         cells = config['cells'][dconfig][cdependency][dependency][k][node_id]
                         if config['transitions']:
                             cells[token_target] = v['cells'][dependency][k][0][idx].tolist()
-
                         else:
                             if token_target not in cells:
                                 cells[token_target] = {}
@@ -179,7 +156,7 @@ class Server(object):
                     # attr_index handled within label_index
                     if k == 'attr_index': continue
 
-                    p = {}
+                    prop[dconfig][cdependency][k] = p = {}
 
                     probs = v['probabilities'][k][0]
                     if dconfig == 'joint_configs':
@@ -196,7 +173,7 @@ class Server(object):
                     if k == 'label_index' or k == 'transitions_index':
 
                         p['actual_probability'] = float(probs[token_target])
-                        if not config['transitions']:
+                        if config['transitions'] == 'false':
                             p['actual_probability'] *= float(v['probabilities']['attr_index'][0][idx][attr_target])
 
                         if k == 'label_index':
@@ -220,7 +197,8 @@ class Server(object):
                         if k == 'label_index':
                             p['actual_attr'] = revlex['attr'][str(attr_target)]
                         else:
-                            p['transition_groups'] = config['transitions_groups'][p['actual_token']] if p['actual_token'] in config['transitions_groups'] else False
+                            pass
+                            #p['transition_groups'] = config['ancestors']['0']['transitions_groups'][p['actual_token']] if p['actual_token'] in config['ancestors']['0']['transitions_groups'] else False
                         expected_probability = float(probs[0][0])
                         p['ratio'] = p['actual_probability'] / expected_probability
                     elif k == 'pointers':
@@ -234,7 +212,6 @@ class Server(object):
                         p['actual'] = target
                         p['expected'] = probs.tolist()
 
-                    prop[dconfig][cdependency][k] = p
         return prop
 
     def get_cells(self, node_id, prop, data_dict, initials_dict, test):
@@ -335,31 +312,43 @@ class Server(object):
     def infer(self, data):
         rows = process_ast(data)
 
-        for transitions in self.config['tests']:
-            for test in self.config['tests'][transitions]:
-                print(test, transitions)
-                test_conf = self.config['tests'][transitions][test]
-                transition = test_conf['transitions']
+        for test in self.test_conf:
+            for root_node in rows[test]:
+                for transitions in rows[test][root_node]:
+                    if len(rows[test][root_node][transitions]) == 0: continue
 
-                lexicon = test_conf['lexicon']['token_to_index']
-                row = finish_row(rows[transition][test], lexicon)
-                data_dict = {}
-                for k in test_conf['features']:
-                    data_dict[test_conf['features'][k]] = [row[k]]
+                    root_transitions = data.prop_map[root_node][test][root_node][transitions]['transitions']
+                    if root_transitions == '<unk>': continue
+                    transitions_ = 'true' if transitions else 'false'
+                    root_lex = self.root_config['root_lexicon'][test][transitions_]['token_to_index']
+                    if root_transitions not in root_lex['transitions']: continue
+                    root_idx = str(root_lex['transitions'][root_transitions])
 
-                test_conf['session'].run(test_conf['tensor_iter'], data_dict)
+                    test_conf = self.test_conf[test][root_idx]
+                    if not test_conf or transitions_ not in test_conf: continue
+                    test_conf = test_conf[transitions_]
 
-                vals = test_conf['session'].run(test_conf['fetches'])
+                    print('Running model {} {} {}'.format(test, root_idx, transitions))
+                    lexicon = test_conf['lexicon']
+                    row = finish_row(rows[test][root_node][transitions], lexicon['token_to_index'], root_lex)
+                    data_dict = {}
+                    for k in test_conf['features']:
+                        data_dict[test_conf['features'][k]] = [row[k]]
 
-                nodes = data.nodes[transition][test]['forward']
-                for i in range(len(nodes)):
-                    nodes[i].update(self.gather_props(vals, data_dict, test_conf, node=nodes[i]))
+                    test_conf['session'].run(test_conf['tensor_iter'], data_dict)
+
+                    vals = test_conf['session'].run(test_conf['fetches'])
+
+                    nodes = data.nodes[test][root_node][transitions]['forward']
+                    for i in range(len(nodes)):
+                        nodes[i].update(self.gather_props(vals, data_dict, test_conf, lexicon, node=nodes[i]))
 
 
     def process_code(self, code):
         try:
             data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         except Exception as e:
+            print(str(e))
             # TODO
             return {'error': "Couldn't parse code." + str(e)}
 
@@ -371,6 +360,7 @@ class Server(object):
         output = {
             'code': CGenerator(data).code,
             'test_results': data.results,
+            'dependency_configs': self.dependency_configs,
             'props': data.prop_map
         }
         return output
