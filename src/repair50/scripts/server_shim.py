@@ -43,7 +43,7 @@ def send_json(sock, msg):
 
 
 def start_worker(q):
-    server = Server(args.path, args.subtests)
+    server = Server(args.datapath, args.subtests)
     while True:
         sock, input_ = q.get()
         print('Handling input')
