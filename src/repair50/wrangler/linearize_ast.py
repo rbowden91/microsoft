@@ -87,7 +87,7 @@ class WrangledAST(object):
         self.generic_visit()
         self.transitions_groups = collections.defaultdict(lambda: collections.defaultdict(lambda:
             collections.defaultdict(lambda: collections.defaultdict(int))))
-        self.get_transitions_groups(ast, ast.node_properties['node_num'])
+        self.get_transitions_groups(ast)
 
     def update_args(self, args, args_update):
         for test in args_update:
@@ -95,22 +95,22 @@ class WrangledAST(object):
                 for transitions in args_update[test][ancestor]:
                     args[test][ancestor][transitions].update(args_update[test][ancestor][transitions])
 
-    def get_transitions_groups(self, node, ast_node_num):
+    def get_transitions_groups(self, node):
         if node.__class__.__name__ == 'NodeWrapper':
-            return self.get_transitions_groups(node.new, ast_node_num) if node.new is not None else None
-
-        for test in self.tests:
-            transitions = node.node_properties['props'][test][ast_node_num][True]
-            if transitions:
-                tg = self.transitions_groups[test][transitions['transitions']]
-                for test2 in self.tests:
-                    transitions2 = node.node_properties['props'][test2][ast_node_num][True]
-                    if transitions2:
-                        tg[test2][transitions2['transitions']] += 1
+            return self.get_transitions_groups(node.new) if node.new is not None else None
+        if node.__class__.__name__ in transition_classes:
+            for test in self.tests:
+                transitions = node.node_properties['props'][test][node.node_properties['node_num']][True]
+                if transitions:
+                    tg = self.transitions_groups[test][transitions['transitions']]
+                    for test2 in self.tests:
+                        transitions2 = node.node_properties['props'][test2][node.node_properties['node_num']][True]
+                        if transitions2:
+                            tg[test2][transitions2['transitions']] += 1
 
         children = node.children()
         for i in range(len(children)):
-            self.get_transitions_groups(children[i][1], ast_node_num)
+            self.get_transitions_groups(children[i][1])
 
     # This is currently O(n^2)
     def handle_pointers(self, args):

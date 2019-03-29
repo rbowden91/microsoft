@@ -101,7 +101,12 @@ class Server(object):
         with open(root_file, 'r') as f:
             self.root_config = json.load(f)
         for test in self.config['tests']:
-            if subtests and test not in subtests: continue
+            if subtests and test not in subtests:
+                for i in range(len(self.config['unit_tests'])):
+                    if self.config['unit_tests'][i]['name'] == test:
+                        #self.config['unit_tests'].pop(i)
+                        break
+                continue
             for root_idx in self.config['tests'][test]:
                 for transitions in self.config['tests'][test][root_idx]:
                     model_file = os.path.join(data_path, 'tests', test, root_idx, transitions, 'best', 'config.json')
@@ -188,20 +193,18 @@ class Server(object):
                                 new_probs.extend([(token[0] * float(attr_probs[j]),
                                                     token[1], revlex['attr'][str(j)]) for j in range(len(attr_probs))])
                             probs = new_probs
+                            p['actual_attr'] = revlex['attr'][str(attr_target)]
                             key = 'label'
                         else:
                             probs = [(float(probs[j]), revlex['transitions'][str(j)]) for j in range(len(probs))]
                             #probs = probs.tolist()
+                            #print(config['transitions_groups'])
+                            p['transitions_groups'] = config['transitions_groups']#[p['actual_token']] if p['actual_token'] in config['transitions_groups'] else False
                             key = 'transitions'
 
                         probs.sort(key=lambda x: x[0], reverse=True)
                         p['probabilities'] = [x for x in probs if x[0] > .001]
                         p['actual_token'] = revlex[key][str(token_target)]
-                        if k == 'label_index':
-                            p['actual_attr'] = revlex['attr'][str(attr_target)]
-                        else:
-                            pass
-                            #p['transition_groups'] = config['ancestors']['0']['transitions_groups'][p['actual_token']] if p['actual_token'] in config['ancestors']['0']['transitions_groups'] else False
                         expected_probability = float(probs[0][0])
                         p['ratio'] = p['actual_probability'] / expected_probability
                     elif k == 'pointers':
