@@ -348,6 +348,7 @@ class Server(object):
 
 
     def process_code(self, code):
+        data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         try:
             data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         except Exception as e:

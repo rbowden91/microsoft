@@ -69,6 +69,8 @@ class CGenerator(object):
     def visit(self, node):
         if node is None:
             return {'class': 'empty'}
+        if 'pointers' in node.node_properties:
+            del(node.node_properties['pointers'])
         if isinstance(node, NodeWrapper):
             return self.visit(node.new)
 

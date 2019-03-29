@@ -21,7 +21,7 @@ NUM_PROCESSES = 1
 HOST = ''
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)
+parser.add_argument('-p', '--port', help='port number (default 12347)', type=int, default=12347)
 parser.add_argument('-d', '--datapath', help='model output directory (default "tmp")',
         default='/home/rbowden/repos/repair50/data/training_data/vig_no_decl10/ast/tmp')
 parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split(), default=None)
