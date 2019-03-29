@@ -18,7 +18,7 @@ from typing import Dict
 from ..server import Server # type: ignore
 
 NUM_PROCESSES = 1
-HOST = '127.0.0.1'
+HOST = ''
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)

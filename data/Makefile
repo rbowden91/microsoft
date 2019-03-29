@@ -10,10 +10,10 @@ server:
 	repair50_shim -t'test7 test8' -d cs50_data/training_data/vigenere1000/tmp15 -p 12344
 
 server1:
-	repair50_shim -t'null test1 test2 test3 test4' -d cs50_data/training_data/vigenere1000/tmp15 -p 12344
+	repair50_shim -t'null test1 test2 test3 test4 test6' -d cs50_data/training_data/vigenere1000/tmp15 -p 12344
 
 server2:
-	repair50_shim -t'test5 test6 test7 test8 test9' -d cs50_data/training_data/vigenere1000/tmp15 -p 12346
+	repair50_shim -t'test5 test7 test8 test9' -d cs50_data/training_data/vigenere1000/tmp15 -p 12346
 
 multi_server:
 	repair50_multi_shim -p 12344

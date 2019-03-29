@@ -18,7 +18,7 @@ from typing import Dict
 from ..server import Server # type: ignore
 
 NUM_PROCESSES = 1
-HOST = '127.0.0.1'
+HOST = ''
 servers = [('korra.rbowden.com', 12344), ('appa.rbowden.com', 12346)]
 
 parser = argparse.ArgumentParser()
