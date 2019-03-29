@@ -56,7 +56,7 @@ def process_queue(queue, lexicon, transitions_groups, lock, tests):
                 for root_node in rows[test]:
                     for transitions in rows[test][root_node]:
                         if not rows[test][root_node][transitions]: continue
-                        root_transitions = data.prop_map[root_node][test][root_node][transitions]['transitions']
+                        root_transitions = data.prop_map[root_node]['props'][test][root_node][transitions]['transitions']
                         queue['tests'][test][root_transitions][transitions].append(rows[test][root_node][transitions])
         queue['queue'].task_done()
 

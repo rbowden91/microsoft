@@ -287,7 +287,7 @@ class Server(object):
             props.update(prop)
             if node_id not in self.data.prop_map:
                 self.data.prop_map[node_id] = {}
-            self.data.prop_map[node_id][test] = props
+            self.data.prop_map[node_id]['props'][test] = props
             row.append(node_id)
             if prop[dconfig][cdependency]['last_sibling' if direction == 'forward' else 'first_sibling']['expected'] > 0.5:
                 break
@@ -306,7 +306,7 @@ class Server(object):
             # TODO: learn these from the data
             # ExpressionList? Have an attr that is if it is empty or not
             for node_id in row:
-                prop = self.data.prop_map[node_id][test][dconfig][cdependency]
+                prop = self.data.prop_map[node_id]['props'][test][dconfig][cdependency]
                 if prop['label_index']['actual_label'] not in ['Constant', 'IdentifierType', 'ID', 'ExpressionList', 'Exprlist']:
                     queue.append(node_id)
 
@@ -320,7 +320,7 @@ class Server(object):
                 for transitions in rows[test][root_node]:
                     if len(rows[test][root_node][transitions]) == 0: continue
 
-                    root_transitions = data.prop_map[root_node][test][root_node][transitions]['transitions']
+                    root_transitions = data.prop_map[root_node]['props'][test][root_node][transitions]['transitions']
                     if root_transitions == '<unk>': continue
                     transitions_ = 'true' if transitions else 'false'
                     root_lex = self.root_config['root_lexicon'][test][transitions_]['token_to_index']
