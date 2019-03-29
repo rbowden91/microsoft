@@ -7,6 +7,6 @@ train:
 	repair50_train -b1 -d"d2" -e2 -f -p cs50_data/training_data/vigenere1000 -s tmp15 --num_layers=2 --cpu -t'test9' --hidden_size=50
 
 server:
-	repair50_shim -p cs50_data/training_data/vigenere1000/tmp15
+	repair50_shim -t'test7 test8' -p cs50_data/training_data/vigenere1000/tmp15
 
 .PHONY: server preprocess train

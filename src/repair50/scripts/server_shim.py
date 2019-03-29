@@ -24,6 +24,7 @@ PORT = 12344
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--path', help='model output directory (default "tmp")',
         default='/home/rbowden/repos/repair50/data/training_data/vig_no_decl10/ast/tmp')
+parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split(), default=None)
 args = parser.parse_args()
 
 def send_json(sock, msg):
@@ -42,7 +43,7 @@ def send_json(sock, msg):
 
 
 def start_worker(q):
-    server = Server(args.path)
+    server = Server(args.path, args.subtests)
     while True:
         sock, input_ = q.get()
         print('Handling input')

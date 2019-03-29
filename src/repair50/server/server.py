@@ -90,7 +90,9 @@ class Server(object):
 
     # TODO: close self.session in Server deconstructor?
     # TODO: pass in the config directly instead of data_path
-    def __init__(self, data_path) -> None:
+    def __init__(self, data_path, subtests) -> None:
+        self.subtests = subtests
+
         with open(os.path.join(data_path, 'config.json')) as f:
             self.config = json.load(f)
 
@@ -99,6 +101,7 @@ class Server(object):
         with open(root_file, 'r') as f:
             self.root_config = json.load(f)
         for test in self.config['tests']:
+            if subtests and test not in subtests: continue
             for root_idx in self.config['tests'][test]:
                 for transitions in self.config['tests'][test][root_idx]:
                     model_file = os.path.join(data_path, 'tests', test, root_idx, transitions, 'best', 'config.json')
