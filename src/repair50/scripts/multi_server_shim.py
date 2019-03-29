@@ -19,8 +19,12 @@ from ..server import Server # type: ignore
 
 NUM_PROCESSES = 1
 HOST = '127.0.0.1'
-PORT = 12344
-servers = [('korra.rbowden.com', 12345), ('appa.rbowden.com', 12345)]
+servers = [('korra.rbowden.com', 12344), ('appa.rbowden.com', 12346)]
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)
+
+args = parser.parse_args()
 
 sel = selectors.DefaultSelector()
 
@@ -64,11 +68,11 @@ def main():
         p.daemon = True
         p.start()
 
-    #sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    lsock.bind((HOST, PORT))
+    lsock.bind((HOST, args.port))
     lsock.listen()
-    print('listening on', (HOST, PORT))
+    print('listening on', (HOST, args.port))
     lsock.setblocking(False)
 
     sel.register(lsock, selectors.EVENT_READ, data={'type': 'listener'})
@@ -79,7 +83,7 @@ def main():
         sock.setblocking(False)
         sock.connect_ex(server)
         server_map[server] = sock
-        sel.register(sock, events, data={'input':b'', 'type':'server'})
+        sel.register(sock, selectors.EVENT_READ, data={'input':b'', 'type':'server'})
 
     try:
         while True:
@@ -87,7 +91,7 @@ def main():
             for key, mask in events:
                 sock = key.fileobj
                 data = key.data
-                if data.type == 'listener':
+                if data['type'] == 'listener':
                     conn, addr = sock.accept()  # Should be ready to read
                     print('accepted connection from', addr)
                     conn.setblocking(False)
@@ -104,12 +108,12 @@ def main():
                                 json_input = json.loads(json_input)
                                 assert 'session_id' in json_input
 
-                                if data.type == 'client':
+                                if data['type'] == 'client':
                                     client_map[json_input['session_id']] = sock
                                     for server in server_map:
                                         q.put(send_json(server_map[server]. json_input))
                                 else:
-                                    assert data.type == 'server'
+                                    assert data['type'] == 'server'
                                     if json_input['session_id'] not in client_map: continue
                                     client_sock = client_map[json_input['session_id']]
                                     q.put((client_sock, json_input))

@@ -19,10 +19,10 @@ from ..server import Server # type: ignore
 
 NUM_PROCESSES = 1
 HOST = '127.0.0.1'
-PORT = 12344
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-p', '--path', help='model output directory (default "tmp")',
+parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)
+parser.add_argument('-d', '--datapath', help='model output directory (default "tmp")',
         default='/home/rbowden/repos/repair50/data/training_data/vig_no_decl10/ast/tmp')
 parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split(), default=None)
 args = parser.parse_args()
@@ -85,9 +85,9 @@ def main():
     sel = selectors.DefaultSelector()
     lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    lsock.bind((HOST, PORT))
+    lsock.bind((HOST, args.port))
     lsock.listen()
-    print('listening on', (HOST, PORT))
+    print('listening on', (HOST, args.port))
     lsock.setblocking(False)
     sel.register(lsock, selectors.EVENT_READ, data=None)
     while True:

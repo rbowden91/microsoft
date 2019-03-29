@@ -32,7 +32,8 @@ setup(name='repair50',
         'console_scripts': [
             'repair50_shim = repair50.scripts.server_shim:main',
             'repair50_preprocess = repair50.scripts.preprocess:main',
-            'repair50_train = repair50.scripts.train:main'
+            'repair50_train = repair50.scripts.train:main',
+            'repair50_multi_shim = repair50.scripts.multi_server_shim:main'
         ]
     },
     zip_safe=False)
