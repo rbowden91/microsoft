@@ -49,6 +49,7 @@ def start_worker(q):
         print('Handling input')
         try:
             output = server.process_code(input_['code'])
+            print(output)
             output['session_id'] = input_['session_id']
             props = output['props']
             del(output['props'])

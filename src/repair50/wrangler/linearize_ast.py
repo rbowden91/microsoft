@@ -225,9 +225,9 @@ class WrangledAST(object):
 
         nprops = node.node_properties
         nprops['node_num'] = self.num_nodes
+        self.prop_map[nprops['node_num']] = nprops
         self.num_nodes += 1
-        self.prop_map[nprops['node_num']] = nprops['props'] = \
-            collections.defaultdict(lambda: collections.defaultdict(lambda:
+        nprops['props'] = collections.defaultdict(lambda: collections.defaultdict(lambda:
                     collections.defaultdict(lambda: False)))
 
         attr = self.get_attr(node)

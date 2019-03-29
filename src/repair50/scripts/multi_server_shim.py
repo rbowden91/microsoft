@@ -19,7 +19,7 @@ from ..server import Server # type: ignore
 
 NUM_PROCESSES = 1
 HOST = ''
-servers = [('korra.rbowden.com', 12344), ('appa.rbowden.com', 12346)]
+servers = [('korra.rbowden.com', 12344), ('appa.rbowden.com', 12347)]
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)
@@ -111,15 +111,16 @@ def main():
                                 if data['type'] == 'client':
                                     client_map[json_input['session_id']] = sock
                                     for server in server_map:
-                                        q.put(send_json(server_map[server]. json_input))
+                                        q.put((server_map[server], json_input))
                                 else:
                                     assert data['type'] == 'server'
                                     if json_input['session_id'] not in client_map: continue
                                     client_sock = client_map[json_input['session_id']]
                                     q.put((client_sock, json_input))
                             data['input'] = input_[0]
-                        except:
+                        except Exception as e:
                             # TODO: this is bad if it was to a server
+                            print(e)
                             sel.unregister(sock)
                             sock.close()
                             continue
