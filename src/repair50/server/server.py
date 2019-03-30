@@ -358,12 +358,11 @@ class Server(object):
                     if test == 'null': continue
                     if len(rows[test][root_idx][transitions]) == 0: continue
 
-                    transitions_ = 'true' if transitions else 'false'
                     root_node = data.prop_map[root_idx]['props']
                     root_props = root_node[test][root_idx][transitions]
                     root_props['suggested_trans_groups'] = collections.defaultdict(int)
                     if not root_props['unknown_transitions']: continue
-                    transitions = root_props['transitions']
+                    transitions_ = 'true' if transitions else 'false'
                     for test2 in data.nodes:
                         if test2 == 'null' or test == test2: continue
                         root_props2 = root_node[test2][root_idx][transitions]
@@ -373,7 +372,6 @@ class Server(object):
                             root_props['suggested_trans_groups'][correct_transitions] += tg[correct_transitions]
 
     def process_code(self, code):
-        data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         try:
             data = wrangle(code, tests=self.config['unit_tests'], is_file=False)
         except Exception as e:
