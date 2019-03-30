@@ -194,17 +194,16 @@ class Server(object):
                                                     token[1], revlex['attr'][str(j)]) for j in range(len(attr_probs))])
                             probs = new_probs
                             p['actual_attr'] = revlex['attr'][str(attr_target)]
-                            key = 'label'
+                            p['actual_label'] = revlex[key][str(token_target)]
                         else:
                             probs = [(float(probs[j]), revlex['transitions'][str(j)]) for j in range(len(probs))]
                             #probs = probs.tolist()
                             #print(config['transitions_groups'])
-                            p['transitions_groups'] = config['transitions_groups'][p['actual_token']] if p['actual_token'] in config['transitions_groups'] else False
-                            key = 'transitions'
+                            p['actual_transitions'] = revlex[key][str(token_target)]
+                            p['transitions_groups'] = config['transitions_groups'][p['actual_transitions']] if p['actual_transitions'] in config['transitions_groups'] else False
 
                         probs.sort(key=lambda x: x[0], reverse=True)
                         p['probabilities'] = [x for x in probs if x[0] > .001]
-                        p['actual_token'] = revlex[key][str(token_target)]
                         expected_probability = float(probs[0][0])
                         p['ratio'] = p['actual_probability'] / expected_probability
                     elif k == 'pointers':
