@@ -335,7 +335,7 @@ class Server(object):
                     root_props['root_trans_idx'] = root_trans_idx
 
                     test_conf = self.test_conf[test][root_trans_idx][transitions_]
-                    test_conf = test_conf[transitions_]
+                    #test_conf = test_conf[transitions_]
 
                     print('Running model {} {} {}'.format(test, root_trans_idx, transitions))
                     lexicon = test_conf['lexicon']
@@ -352,9 +352,12 @@ class Server(object):
                     for i in range(len(nodes)):
                         nodes[i].update(self.gather_props(vals, data_dict, test_conf, lexicon, node=nodes[i]))
 
-        for test in data.nodes:
-            for root_idx in data.nodes[test]:
-                for transitions in data.nodes[test][root_idx]:
+        for test in self.test_conf:
+            for root_idx in rows[test]:
+                for transitions in rows[test][root_idx]:
+                    if test == 'null': continue
+                    if len(rows[test][root_idx][transitions]) == 0: continue
+
                     transitions_ = 'true' if transitions else 'false'
                     root_node = data.prop_map[root_idx]['props']
                     root_props = root_node[test][root_idx][transitions]
@@ -362,8 +365,9 @@ class Server(object):
                     if not root_props['unknown_transitions']: continue
                     transitions = root_props['transitions']
                     for test2 in data.nodes:
+                        if test2 == 'null' or test == test2: continue
                         root_props2 = root_node[test2][root_idx][transitions]
-                        if root_props2['unknown_transitions']: continue
+                        if not root_props2 or root_props2['unknown_transitions']: continue
                         tg = self.test_conf[test2][root_props2['root_trans_idx']][transitions_]['transitions_groups'][test]
                         for correct_transitions in tg:
                             root_props['suggested_trans_groups'][correct_transitions] += tg[correct_transitions]
