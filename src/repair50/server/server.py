@@ -119,7 +119,7 @@ class Server(object):
                     test_conf['graph'] = tf.Graph()
                     with test_conf['graph'].as_default():
                         saver = tf.train.import_meta_graph(os.path.join(test_conf['best_dir'], "model.meta"))
-                        test_conf['session'] = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 0}))
+                        test_conf['session'] = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 1}))
                         saver.restore(test_conf['session'], os.path.join(test_conf['best_dir'], 'model'))
 
         print('Server initialized')
@@ -200,7 +200,6 @@ class Server(object):
                             #probs = probs.tolist()
                             #print(config['transitions_groups'])
                             p['actual_transitions'] = revlex['transitions'][str(token_target)]
-                            p['transitions_groups'] = config['transitions_groups'][p['actual_transitions']] if p['actual_transitions'] in config['transitions_groups'] else False
 
                         probs.sort(key=lambda x: x[0], reverse=True)
                         p['probabilities'] = [x for x in probs if x[0] > .001]
@@ -319,24 +318,28 @@ class Server(object):
         import pprint
 
         for test in self.test_conf:
-            for root_node in rows[test]:
-                for transitions in rows[test][root_node]:
-                    if len(rows[test][root_node][transitions]) == 0: continue
+            for root_idx in rows[test]:
+                for transitions in rows[test][root_idx]:
+                    if len(rows[test][root_idx][transitions]) == 0: continue
 
-                    root_transitions = data.prop_map[root_node]['props'][test][root_node][transitions]['transitions']
+                    root_props = data.prop_map[root_idx]['props'][test][root_idx][transitions]
+                    root_transitions = root_props['transitions']
                     if root_transitions == '<unk>': continue
                     transitions_ = 'true' if transitions else 'false'
                     root_lex = self.root_config['root_lexicon'][test]['token_to_index']
-                    if root_transitions not in root_lex['transitions']: continue
-                    root_idx = str(root_lex['transitions'][root_transitions])
+                    if root_transitions not in root_lex['transitions']:
+                        root_props['unknown_transitions'] = True
+                        continue
+                    root_trans_idx = str(root_lex['transitions'][root_transitions])
+                    root_props['unknown_transitions'] = False
+                    root_props['root_trans_idx'] = root_trans_idx
 
-                    test_conf = self.test_conf[test][root_idx]
-                    if not test_conf or transitions_ not in test_conf: continue
+                    test_conf = self.test_conf[test][root_trans_idx][transitions_]
                     test_conf = test_conf[transitions_]
 
-                    print('Running model {} {} {}'.format(test, root_idx, transitions))
+                    print('Running model {} {} {}'.format(test, root_trans_idx, transitions))
                     lexicon = test_conf['lexicon']
-                    row = finish_row(rows[test][root_node][transitions], lexicon['token_to_index'], root_lex)
+                    row = finish_row(rows[test][root_idx][transitions], lexicon['token_to_index'], root_lex)
                     data_dict = {}
                     for k in test_conf['features']:
                         data_dict[test_conf['features'][k]] = [row[k]]
@@ -345,10 +348,25 @@ class Server(object):
 
                     vals = test_conf['session'].run(test_conf['fetches'])
 
-                    nodes = data.nodes[test][root_node][transitions]['forward']
+                    nodes = data.nodes[test][root_idx][transitions]['forward']
                     for i in range(len(nodes)):
                         nodes[i].update(self.gather_props(vals, data_dict, test_conf, lexicon, node=nodes[i]))
 
+        for test in data.nodes:
+            for root_idx in data.nodes[test]:
+                for transitions in data.nodes[test][root_idx]:
+                    transitions_ = 'true' if transitions else 'false'
+                    root_node = data.prop_map[root_idx]['props']
+                    root_props = root_node[test][root_idx][transitions]
+                    root_props['suggested_trans_groups'] = collections.defaultdict(int)
+                    if not root_props['unknown_transitions']: continue
+                    transitions = root_props['transitions']
+                    for test2 in data.nodes:
+                        root_props2 = root_node[test2][root_idx][transitions]
+                        if root_props2['unknown_transitions']: continue
+                        tg = self.test_conf[test2][root_props2['root_trans_idx']][transitions_]['transitions_groups'][test]
+                        for correct_transitions in tg:
+                            root_props['suggested_trans_groups'][correct_transitions] += tg[correct_transitions]
 
     def process_code(self, code):
         data = wrangle(code, tests=self.config['unit_tests'], is_file=False)

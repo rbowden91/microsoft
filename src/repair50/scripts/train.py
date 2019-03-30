@@ -283,11 +283,8 @@ class Trainer(object):
         return total_perplexity
 
 def main():
-    args.data_path = os.path.join(os.getcwd(), args.data_path)
-    print('loading config')
     with open(os.path.join(args.data_path, 'config.json')) as f:
         config = json.load(f)
-    print('config loaded')
     # Note that at this point, the training, validation, and test data have already been split up.
     # So, we preserve the ratios between them.
     config.update(vars(args))

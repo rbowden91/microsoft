@@ -3,7 +3,7 @@ import collections
 from ..default_dict import data_dict
 from pycparser import c_ast # type:ignore
 
-transition_classes = ['FileAST', 'FuncDef', 'Compound', 'ExpressionList', 'If', 'For', 'While', 'DoWhile', 'Switch', 'Case', 'Default']
+transition_classes = ['FileAST', 'FuncDef', 'ExpressionList', 'If', 'For', 'While', 'DoWhile', 'Switch', 'Case', 'Default']
 
 default_dependencies = lambda: {
     'pointers': {'memory': [], 'mask': []},
