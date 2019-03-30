@@ -7,6 +7,7 @@ import socket
 import selectors
 import traceback
 import time
+import signal
 
 #from multiprocessing import Process, Queue
 from queue import Queue
@@ -26,6 +27,16 @@ parser.add_argument('-d', '--datapath', help='model output directory (default "t
         default='tmp')
 parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split(), default=None)
 args = parser.parse_args()
+
+sel = selectors.DefaultSelector()
+
+def sigint_handler(signum, frame):
+    sel.close()
+    sys.exit()
+
+signal.signal(signal.SIGINT, sigint_handler)
+
+
 
 def send_json(sock, msg):
     output = json.dumps(msg).encode('latin-1') + b'\n\n'
@@ -82,7 +93,6 @@ def main():
         p.daemon = True
         p.start()
 
-    sel = selectors.DefaultSelector()
     lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     lsock.bind((HOST, args.port))
@@ -90,42 +100,36 @@ def main():
     print('listening on', (HOST, args.port))
     lsock.setblocking(False)
     sel.register(lsock, selectors.EVENT_READ, data=None)
-    try:
-        while True:
-            events = sel.select(timeout=None)
-            for key, mask in events:
-                if key.data is None:
-                    conn, addr = lsock.accept()  # Should be ready to read
-                    print('accepted connection from', addr)
-                    conn.setblocking(False)
-                    sel.register(conn, selectors.EVENT_READ, data={'input':b''})
-                else:
-                    sock = key.fileobj
-                    data = key.data
-                    if mask & selectors.EVENT_READ:
-                        try:
-                            recv_data = sock.recv(4096)  # Should be ready to read
-                        except:
-                            recv_data = None
+    while True:
+        events = sel.select(timeout=None)
+        for key, mask in events:
+            if key.data is None:
+                conn, addr = lsock.accept()  # Should be ready to read
+                print('accepted connection from', addr)
+                conn.setblocking(False)
+                sel.register(conn, selectors.EVENT_READ, data={'input':b''})
+            else:
+                sock = key.fileobj
+                data = key.data
+                if mask & selectors.EVENT_READ:
+                    try:
+                        recv_data = sock.recv(4096)  # Should be ready to read
+                    except:
+                        recv_data = None
 
-                        if recv_data:
-                            data['input'] += recv_data
-                            input_ = data['input'].split(b'\n\n')
-                            if len(input_) > 1:
-                                # TODO: prevent further reading from this socket until the current command is handled
-                                data['input'] = b'\n\n'.join(input_[1:])
-                                try:
-                                    input_ = json.loads(input_[0])
-                                    q.put((sock, input_))
-                                except:
-                                    sel.unregister(sock)
-                                    sock.close()
-                        else:
-                            print('Dropped connection')
-                            sel.unregister(sock)
-                            sock.close()
-
-    except KeyboardInterrupt:
-        print("Caught keyboard interrupt, exiting")
-    finally:
-        sel.close()
+                    if recv_data:
+                        data['input'] += recv_data
+                        input_ = data['input'].split(b'\n\n')
+                        if len(input_) > 1:
+                            # TODO: prevent further reading from this socket until the current command is handled
+                            data['input'] = b'\n\n'.join(input_[1:])
+                            try:
+                                input_ = json.loads(input_[0])
+                                q.put((sock, input_))
+                            except:
+                                sel.unregister(sock)
+                                sock.close()
+                    else:
+                        print('Dropped connection')
+                        sel.unregister(sock)
+                        sock.close()

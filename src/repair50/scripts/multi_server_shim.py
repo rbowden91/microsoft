@@ -7,6 +7,7 @@ import socket
 import selectors
 import traceback
 import time
+import signal
 
 #from multiprocessing import Process, Queue
 from queue import Queue
@@ -27,6 +28,12 @@ parser.add_argument('-p', '--port', help='port number (default 12344)', type=int
 args = parser.parse_args()
 
 sel = selectors.DefaultSelector()
+
+def sigint_handler(signum, frame):
+    sel.close()
+    sys.exit()
+
+signal.signal(signal.SIGINT, sigint_handler)
 
 def send_json(sock, msg):
     output = json.dumps(msg).encode('latin-1') + b'\n\n'
@@ -95,54 +102,47 @@ def main():
 
     sel.register(lsock, selectors.EVENT_READ, data={'type': 'listener'})
 
-    try:
-        while True:
-            events = sel.select(timeout=5)
-            for key, mask in events:
-                sock = key.fileobj
-                data = key.data
-                if data['type'] == 'listener':
-                    conn, addr = sock.accept()  # Should be ready to read
-                    print('accepted connection from', addr)
-                    conn.setblocking(False)
-                    sel.register(conn, selectors.EVENT_READ, data={'input':b'', 'type':'client'})
-                else:
-                    if mask & selectors.EVENT_READ:
-                        try:
-                            recv_data = sock.recv(4096)  # Should be ready to read
-                            if len(recv_data) == 0:
-                                raise Exception
-                            data['input'] += recv_data
-                            input_ = data['input'].split(b'\n\n')
-                            while len(input_) > 1:
-                                # TODO: prevent further reading from this socket until the current command is handled
-                                json_input = input_.pop(0)
-                                json_input = json.loads(json_input)
-                                assert 'session_id' in json_input
+    while True:
+        events = sel.select(timeout=5)
+        for key, mask in events:
+            sock = key.fileobj
+            data = key.data
+            if data['type'] == 'listener':
+                conn, addr = sock.accept()  # Should be ready to read
+                print('accepted connection from', addr)
+                conn.setblocking(False)
+                sel.register(conn, selectors.EVENT_READ, data={'input':b'', 'type':'client'})
+            else:
+                if mask & selectors.EVENT_READ:
+                    try:
+                        recv_data = sock.recv(4096)  # Should be ready to read
+                        if len(recv_data) == 0:
+                            raise Exception
+                        data['input'] += recv_data
+                        input_ = data['input'].split(b'\n\n')
+                        while len(input_) > 1:
+                            # TODO: prevent further reading from this socket until the current command is handled
+                            json_input = input_.pop(0)
+                            json_input = json.loads(json_input)
+                            assert 'session_id' in json_input
 
-                                if data['type'] == 'client':
-                                    client_map[json_input['session_id']] = sock
-                                    for sock in server_map:
-                                        q.put((sock, json_input))
-                                else:
-                                    assert data['type'] == 'server'
-                                    if json_input['session_id'] not in client_map: continue
-                                    client_sock = client_map[json_input['session_id']]
-                                    q.put((client_sock, json_input))
-                            data['input'] = input_[0]
+                            if data['type'] == 'client':
+                                client_map[json_input['session_id']] = sock
+                                for sock in server_map:
+                                    q.put((sock, json_input))
+                            else:
+                                assert data['type'] == 'server'
+                                if json_input['session_id'] not in client_map: continue
+                                client_sock = client_map[json_input['session_id']]
+                                q.put((client_sock, json_input))
+                        data['input'] = input_[0]
 
-                        except Exception as e:
-                            #print(e)
-                            if sock in client_map:
-                                del(client_map[sock])
-                            elif sock in server_map:
-                                del(reverse_server_map[server_map[sock]])
-                                del(server_map[sock])
-                            sel.unregister(sock)
-                            sock.close()
-                            continue
-
-    except KeyboardInterrupt:
-        print("Caught keyboard interrupt, exiting")
-    finally:
-        sel.close()
+                    except Exception as e:
+                        #print(e)
+                        if sock in client_map:
+                            del(client_map[sock])
+                        elif sock in server_map:
+                            del(reverse_server_map[server_map[sock]])
+                            del(server_map[sock])
+                        sel.unregister(sock)
+                        sock.close()
