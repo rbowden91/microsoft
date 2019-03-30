@@ -19,7 +19,7 @@ from ..server import Server # type: ignore
 
 NUM_PROCESSES = 1
 HOST = ''
-servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12347)]
+servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12345)]
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)

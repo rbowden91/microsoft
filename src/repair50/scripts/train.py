@@ -294,7 +294,9 @@ def main():
 
     save_path = os.path.join(args.data_path, args.save_path)
 
-    new_config = data_dict(lambda: False)
+    with open(os.path.join(save_path, 'config.json'), 'w') as f:
+        json.dump(config, f)
+
     for test in config['tests']:
         if test not in config['subtests']: continue
         for root_idx in config['tests'][test]:
@@ -307,12 +309,12 @@ def main():
 
                 if args.checkpoint and os.path.isfile(model_config_file):
                     with open(model_config_file) as f:
-                        new_config[test][transitions] = json.load(f)
+                        conf = json.load(f)
                 else:
                     # TODO: delete save_path?
                     data_path = os.path.join(args.data_path, 'tests', test, root_idx, transitions)
                     with open(os.path.join(data_path, 'config.json')) as f:
-                        conf = new_config[test][root_idx][transitions] = json.load(f)
+                        conf = json.load(f)
 
                     for k in ['num_layers', 'max_grad_norm', 'hidden_size']:
                         conf[k] = config[k]
@@ -342,16 +344,7 @@ def main():
                     with open(model_config_file, 'w') as f:
                         json.dump(conf, f)
 
-    with open(os.path.join(save_path, 'config.json'), 'w') as f:
-        json.dump(config, f)
-
-    trainers = data_dict(lambda: False)
-    for test in new_config:
-        for root_idx in new_config[test]:
-            for transitions in new_config[test][root_idx]:
-                if not new_config[test][root_idx][transitions]: continue
-                print(test, root_idx, transitions)
-                trainers[test][root_idx][transitions] = trainer = Trainer(new_config[test][root_idx][transitions], config)
+                trainer = Trainer(conf, config)
                 for i in range(config['epochs']):
                     if trainer.run_epoch():
                         break

@@ -199,7 +199,7 @@ class Server(object):
                             probs = [(float(probs[j]), revlex['transitions'][str(j)]) for j in range(len(probs))]
                             #probs = probs.tolist()
                             #print(config['transitions_groups'])
-                            p['transitions_groups'] = config['transitions_groups']#[p['actual_token']] if p['actual_token'] in config['transitions_groups'] else False
+                            p['transitions_groups'] = config['transitions_groups'][p['actual_token']] if p['actual_token'] in config['transitions_groups'] else False
                             key = 'transitions'
 
                         probs.sort(key=lambda x: x[0], reverse=True)
