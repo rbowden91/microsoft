@@ -294,6 +294,7 @@ def main():
 
     save_path = os.path.join(args.data_path, args.save_path)
 
+    os.makedirs(save_path, exist_ok=True)
     with open(os.path.join(save_path, 'config.json'), 'w') as f:
         json.dump(config, f)
 
