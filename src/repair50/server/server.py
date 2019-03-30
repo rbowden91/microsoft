@@ -316,10 +316,14 @@ class Server(object):
 
     def infer(self, data):
         rows = process_ast(data)
+        import pprint
 
         for test in self.test_conf:
             for root_node in rows[test]:
                 for transitions in rows[test][root_node]:
+                    if root_node == 114:
+                        print(test, root_node, transitions)
+                        pprint.pprint(rows[test][root_node][transitions])
                     if len(rows[test][root_node][transitions]) == 0: continue
 
                     root_transitions = data.prop_map[root_node]['props'][test][root_node][transitions]['transitions']

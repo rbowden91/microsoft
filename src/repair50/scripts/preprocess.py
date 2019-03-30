@@ -60,11 +60,14 @@ def process_queue(queue, lexicon, transitions_groups, lock, tests):
                         queue['tests'][test][root_transitions][transitions].append(rows[test][root_node][transitions])
         queue['queue'].task_done()
 
-def generate_lexicon(lex, cutoff_tokens=['attr', 'transitions']):
-    cutoff = args.num_files * args.unk_cutoff
+def generate_lexicon(lex, root_lex=None):
     revlex = {}
     for k in lex:
-        s = set([label for label in lex[k] if lex[k][label] > cutoff]) if k in cutoff_tokens else set(lex[k])
+        if root_lex:
+            s = set([label for label in lex[k] if label in root_lex[k]])
+        else:
+            cutoff = args.num_files * args.unk_cutoff
+            s = set([label for label in lex[k] if lex[k][label] > cutoff]) if k in ['attr', 'transitions'] else set(lex[k])
         if '<nil>' in s:
             s.remove('<nil>')
         if '<unk>' in s:
@@ -107,33 +110,30 @@ def main():
     queue['queue'].join()
 
     # get the total lexicon
-    root_lexicon = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(lex_ctr)))
+    root_lexicon = collections.defaultdict(lambda: collections.defaultdict(lex_ctr))
     for test in lexicon:
         for root_transitions in lexicon[test]:
-            for transitions in lexicon[test][root_transitions]:
-                lex = lexicon[test][root_transitions][transitions]
-                root_lex = root_lexicon[test][transitions]
-                for k in lex:
-                    for token in lex[k]:
-                        root_lex[k][token] += lex[k][token]
-        for transitions in [True, False]:
-            root_lexicon[test][transitions] = generate_lexicon(root_lexicon[test][transitions])
+            lex = lexicon[test][root_transitions]
+            for k in ['attr', 'label']:
+                for token in lex[False][k]:
+                    root_lexicon[test][k][token] += lex[False][k][token]
+            for token in lex[True]['transitions']:
+                root_lexicon[test]['transitions'][token] += lex[True]['transitions'][token]
+        root_lexicon[test] = generate_lexicon(root_lexicon[test])
 
     config = vars(args)
     config['root_lexicon'] = root_lexicon
     config['tests'] = data_dict(lambda: False)
     for test in lexicon:
-        # need to handle '<nil>' root transition first, since all sub-root-transitions need to use
-        # the '<nil>' (FileAST's) lexicon
+        root_lex = root_lexicon[test]['token_to_index']
         for root_transitions in lexicon[test]:
             if root_transitions == '<unk>': continue
             for transitions in [False, True]:
-                root_lex = root_lexicon[test][transitions]['token_to_index']
                 if transitions and test == 'null' or root_transitions not in root_lex['transitions']:
                     continue
 
-                q = queue['tests'][test][root_transitions][transitions]
                 datasets = {}
+                q = queue['tests'][test][root_transitions][transitions]
                 num_rows = len(q)
                 datasets['train'] = q[:math.floor(num_rows * args.train_fraction)]
                 q = q[math.floor(num_rows * args.train_fraction):]

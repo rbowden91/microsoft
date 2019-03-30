@@ -23,7 +23,7 @@ HOST = ''
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--port', help='port number (default 12347)', type=int, default=12347)
 parser.add_argument('-d', '--datapath', help='model output directory (default "tmp")',
-        default='/home/rbowden/repos/repair50/data/training_data/vig_no_decl10/ast/tmp')
+        default='tmp')
 parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split(), default=None)
 args = parser.parse_args()
 
@@ -90,36 +90,42 @@ def main():
     print('listening on', (HOST, args.port))
     lsock.setblocking(False)
     sel.register(lsock, selectors.EVENT_READ, data=None)
-    while True:
-        events = sel.select(timeout=None)
-        for key, mask in events:
-            if key.data is None:
-                conn, addr = lsock.accept()  # Should be ready to read
-                print('accepted connection from', addr)
-                conn.setblocking(False)
-                sel.register(conn, selectors.EVENT_READ, data={'input':b''})
-            else:
-                sock = key.fileobj
-                data = key.data
-                if mask & selectors.EVENT_READ:
-                    try:
-                        recv_data = sock.recv(4096)  # Should be ready to read
-                    except:
-                        recv_data = None
+    try:
+        while True:
+            events = sel.select(timeout=None)
+            for key, mask in events:
+                if key.data is None:
+                    conn, addr = lsock.accept()  # Should be ready to read
+                    print('accepted connection from', addr)
+                    conn.setblocking(False)
+                    sel.register(conn, selectors.EVENT_READ, data={'input':b''})
+                else:
+                    sock = key.fileobj
+                    data = key.data
+                    if mask & selectors.EVENT_READ:
+                        try:
+                            recv_data = sock.recv(4096)  # Should be ready to read
+                        except:
+                            recv_data = None
 
-                    if recv_data:
-                        data['input'] += recv_data
-                        input_ = data['input'].split(b'\n\n')
-                        if len(input_) > 1:
-                            # TODO: prevent further reading from this socket until the current command is handled
-                            data['input'] = b'\n\n'.join(input_[1:])
-                            try:
-                                input_ = json.loads(input_[0])
-                                q.put((sock, input_))
-                            except:
-                                sel.unregister(sock)
-                                sock.close()
-                    else:
-                        print('Dropped connection')
-                        sel.unregister(sock)
-                        sock.close()
+                        if recv_data:
+                            data['input'] += recv_data
+                            input_ = data['input'].split(b'\n\n')
+                            if len(input_) > 1:
+                                # TODO: prevent further reading from this socket until the current command is handled
+                                data['input'] = b'\n\n'.join(input_[1:])
+                                try:
+                                    input_ = json.loads(input_[0])
+                                    q.put((sock, input_))
+                                except:
+                                    sel.unregister(sock)
+                                    sock.close()
+                        else:
+                            print('Dropped connection')
+                            sel.unregister(sock)
+                            sock.close()
+
+    except KeyboardInterrupt:
+        print("Caught keyboard interrupt, exiting")
+    finally:
+        sel.close()

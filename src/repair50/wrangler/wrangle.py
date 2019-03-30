@@ -51,7 +51,7 @@ def process_ast(ast, lexicon=None, transitions_groups=None, lock=None):
                                         if len(dep_val['memory']) < 20:
                                             dep_val['memory'].extend([0] * (20 - len(dep_val['memory'])))
                                             dep_val['mask'].extend([0] * (20 - len(dep_val['mask'])))
-                                        elif k == 'forward':
+                                        if k == 'forward':
                                             dep_val['memory'] = dep_val['memory'][-20:]
                                             dep_val['mask'] = dep_val['mask'][-20:]
                                         else:
