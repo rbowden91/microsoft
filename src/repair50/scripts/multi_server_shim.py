@@ -14,13 +14,9 @@ from queue import Queue
 from threading import Thread
 from typing import Dict
 
-# TF_CPP_MIN_LOG_LEVEL = '3'
-
-from ..server import Server # type: ignore
-
 NUM_PROCESSES = 1
 HOST = ''
-servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12345)]
+servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12347)]
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)
