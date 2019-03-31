@@ -9,7 +9,7 @@ from .normalizers import normalize
 from .linearize_ast import WrangledAST
 from ..default_dict import data_dict
 
-def process_ast(ast, lexicon=None, transitions_groups=None, lock=None):
+def process_ast(ast, lexicon=None, transitions_groups=None):
     all_new_rows = data_dict(lambda: collections.defaultdict(list))
 
     for test in ast.nodes:
@@ -33,11 +33,11 @@ def process_ast(ast, lexicon=None, transitions_groups=None, lock=None):
 
                     for node in nodes:
                         for feature, val in node.items():
+                            if feature in ['snapshots']: continue
                             if val is None:
                                 node[feature] = '<nil>'
-                            if lock and feature in local_lexicon and val not in local_lexicon[feature]:
-                                with lock:
-                                    lexicon[test][root_transitions][transitions][feature][val] += 1
+                            if lexicon is not None and feature in local_lexicon and val not in local_lexicon[feature]:
+                                lexicon[test][root_transitions][transitions][feature][val] += 1
                                 local_lexicon[feature].add(val)
 
                             if feature not in ['forward', 'reverse']:
@@ -65,7 +65,7 @@ def process_ast(ast, lexicon=None, transitions_groups=None, lock=None):
                                         new_row['-'.join([k,dep])].append(int(dep_val) if isinstance(dep_val, bool) else dep_val)
 
 
-    if lock:
+    if transitions_groups:
         for test in ast.transitions_groups:
             for transition in ast.transitions_groups[test]:
                 for test2 in ast.transitions_groups[test][transition]:
@@ -74,7 +74,7 @@ def process_ast(ast, lexicon=None, transitions_groups=None, lock=None):
 
     return all_new_rows
 
-def tokens_to_ids(tokens, token_to_id, include_token):
+def tokens_to_ids(tokens, token_to_id):
     output = []
     for i in range(len(tokens)):
         token = tokens[i]
@@ -85,7 +85,7 @@ def tokens_to_ids(tokens, token_to_id, include_token):
             #id = token_to_id['<unk_str>']
         else:
             id = token_to_id['<unk>']
-        output.append((id, token) if include_token else id)
+        output.append(id)
     return output
 
 def finish_row(row, lexicon, root_lexicon):
@@ -104,15 +104,12 @@ def finish_row(row, lexicon, root_lexicon):
                         key = k
                         lex = lexicon
 
-                    row[idx + '_index'] = tokens_to_ids(row[idx], lex[key], False)
+                    row[idx + '_index'] = tokens_to_ids(row[idx], lex[key])
                     del(row[idx])
                 else:
                     row[idx + '_index'] = [0] * row_len
         # the nil slot is the only slot that's masked out, other than potential padded batches
         row[i + 'mask'] = [1] * row_len
-
-    del(row['forward-snapshots'])
-    del(row['reverse-snapshots'])
 
     # insert the nil slot
     for i in row:

@@ -17,6 +17,9 @@ import json
 import math
 import collections
 
+from multiprocessing import Process, Queue
+import queue
+
 import numpy as np
 import tensorflow as tf
 from ..model.model import TRNNModel, TRNNJointModel
@@ -39,6 +42,7 @@ parser.add_argument('-p', '--data_path', help='directory to find preprocessed da
 parser.add_argument('-b', '--batch_size', help='batch size', type=int)
 parser.add_argument('-d', '--dependency_configs', help='forward/reverse, etc.', type=lambda s: s.split(), default='d2')
 parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split(), default=None)
+parser.add_argument('--num_processes', help='number of concurrent processes (default 16)', type=int, default=16)
 parser.add_argument('-j', '--joint_configs', help='both, etc.', type=lambda s: s.split(), default=[])
 parser.add_argument('-e', '--epochs', help='how many epochs', type=int)
 parser.add_argument('-w', '--summarywriter', help='turns on summary writer', action='store_true')
@@ -73,7 +77,7 @@ class Trainer(object):
             initializer = tf.random_uniform_initializer(-train_config['init_scale'],
                                                         train_config['init_scale'])
             self.models = {'dependency_configs': {}, 'joint_configs': {}}
-            with tf.variable_scope("TRNNModel/{}/{}/{}".format(self.transitions, self.test, self.root_idx), reuse=None, initializer=initializer):
+            with tf.variable_scope("TRNNModel/{}/{}/{}".format(self.transitions, 'test' if True else self.test, self.root_idx), reuse=None, initializer=initializer):
                 rows = None
                 for i in train_config['dependency_configs']:
                     self.models['dependency_configs'][i] = TRNNModel(
@@ -282,6 +286,19 @@ class Trainer(object):
                         self.root_idx, self.transitions, mode, d, k, perplexity))
         return total_perplexity
 
+def process_queue(q):
+    while True:
+        try:
+            conf, config = q.get(True, 5)
+        except queue.Empty:
+            return
+
+        trainer = Trainer(conf, config)
+        for i in range(config['epochs']):
+            if trainer.run_epoch():
+                break
+        trainer.finish()
+
 def main():
     with open(os.path.join(args.data_path, 'config.json')) as f:
         config = json.load(f)
@@ -295,8 +312,17 @@ def main():
     with open(os.path.join(save_path, 'config.json'), 'w') as f:
         json.dump(config, f)
 
+    q = Queue(maxsize=0)
+
+    processes = []
+    for i in range(args.num_processes):
+        p = Process(target=process_queue, args=(q,))
+        p.daemon = True
+        p.start()
+        processes.append(p)
+
     for test in config['tests']:
-        if test not in config['subtests']: continue
+        if config['subtests'] is not None and test not in config['subtests']: continue
         for root_idx in config['tests'][test]:
             for transitions in config['tests'][test][root_idx]:
                 if config['tests'][test][root_idx][transitions] is False: continue
@@ -341,9 +367,6 @@ def main():
 
                     with open(model_config_file, 'w') as f:
                         json.dump(conf, f)
-
-                trainer = Trainer(conf, config)
-                for i in range(config['epochs']):
-                    if trainer.run_epoch():
-                        break
-                trainer.finish()
+                q.put((conf, config))
+    for p in processes:
+        p.join()

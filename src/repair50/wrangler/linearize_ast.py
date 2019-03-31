@@ -65,14 +65,14 @@ def canonicalize_snapshots(node, test):
         memory.extend(locals_)
         # make changes to variables agnostic of order
         memory.sort()
-        ret = ' locals: ' + ','.join(memory) + '\n'
-        ret += ' stdout: ' + snap['stdout'] + '\n'
-        ret += ' stderr: ' + snap['stderr'] + '\n'
-        ret += ' return: ' + (str(snap['return']) if snap['return'] is not False else '') + '\n'
+        ret = 'locals: ' + ', '.join(memory)
+        ret += ' stdout: ' + snap['stdout']
+        ret += ' stderr: ' + snap['stderr']
+        ret += ' return: ' + (str(snap['return']) if snap['return'] is not False else '') + ' '
         if ret not in transitions:
             transitions.append(ret)
     transitions.sort()
-    return '\n'.join(transitions)
+    return '\n '.join(transitions)
 
 
 class WrangledAST(object):
