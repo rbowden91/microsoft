@@ -21,7 +21,7 @@ train2:
 server3:
 	repair50_shim -t'baz,"World, Say Hello!","Xoqmd, Rby Gflkp!"|BAZ,BARFOO,CAQGON|BaZ,BaRFoo,CaQGon|baz,barfoo,caqgon' -d cs50_data/training_data/vigenere1000/tmp -p 12347
 train3:
-	repair50_train -b1 -d"d2" -e2 -p cs50_data/training_data/vigenere1000 -s tmp --num_layers=2 -t'baz,"World, Say Hello!","Xoqmd, Rby Gflkp!"|BAZ,BARFOO,CAQGON|BaZ,BaRFoo,CaQGon|baz,barfoo,caqgon' --hidden_size=50 --num_processes=16
+	repair50_train.exe -b1 -d"d2" -e2 -p "cs50_data/training_data/vigenere1000" -s tmp --num_layers=2 -t"baz,\"World, Say Hello!\",\"Xoqmd, Rby Gflkp!\"|BAZ,BARFOO,CAQGON|BaZ,BaRFoo,CaQGon|baz,barfoo,caqgon" --hidden_size=50 --num_processes=16
 
 multi_server:
 	repair50_multi_shim -p 12344

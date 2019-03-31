@@ -23,7 +23,6 @@ import queue
 import numpy as np
 import tensorflow as tf
 from ..model.model import TRNNModel, TRNNJointModel
-from ..default_dict import data_dict
 
 #LargeConfig = TrainConfig(
 #  init_scale = 0.04,
@@ -41,7 +40,7 @@ parser.add_argument('-s', '--save_path', help='model output directory (default "
 parser.add_argument('-p', '--data_path', help='directory to find preprocessed data (default "./data/vig10000")', default='./data/vig10000')
 parser.add_argument('-b', '--batch_size', help='batch size', type=int)
 parser.add_argument('-d', '--dependency_configs', help='forward/reverse, etc.', type=lambda s: s.split(), default='d2')
-parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split(), default=None)
+parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split('|'), default=None)
 parser.add_argument('--num_processes', help='number of concurrent processes (default 16)', type=int, default=16)
 parser.add_argument('-j', '--joint_configs', help='both, etc.', type=lambda s: s.split(), default=[])
 parser.add_argument('-e', '--epochs', help='how many epochs', type=int)
@@ -288,10 +287,9 @@ class Trainer(object):
 
 def process_queue(q):
     while True:
-        try:
-            conf, config = q.get(True, 5)
-        except queue.Empty:
-            return
+        item = q.get()
+        if item is False: return
+        conf, config = item
 
         trainer = Trainer(conf, config)
         for i in range(config['epochs']):
@@ -368,5 +366,8 @@ def main():
                     with open(model_config_file, 'w') as f:
                         json.dump(conf, f)
                 q.put((conf, config))
+
+    for p in processes:
+        q.put(False)
     for p in processes:
         p.join()

@@ -12,7 +12,7 @@ import functools
 import tensorflow as tf #type:ignore
 from ..wrangler.wrangle import wrangle, process_ast, finish_row
 
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, current_process
 import queue
 
 from ..default_dict import data_dict
@@ -37,13 +37,13 @@ lex_ctr = lambda: collections.defaultdict(int)
 
 
 def process_queue(filequeue, resultsqueue):
-    all_rows = data_dict(lambda: collections.defaultdict(list))
-    lexicon = data_dict(lambda: {'label': lex_ctr(), 'attr': lex_ctr(), 'transitions': lex_ctr()})
-    transitions_groups = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int))))
-
     while not filequeue.empty():
+        new_rows = data_dict(dict)
+        lexicon = data_dict(lambda: {'label': lex_ctr(), 'attr': lex_ctr(), 'transitions': lex_ctr()})
+        transitions_groups = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int))))
+
         filenumber, filename = filequeue.get()
-        print("File {} of {}: {}".format(filenumber, args.num_files, filename))
+        print("Process {} handling file {} of {}: {}".format(current_process().name, filenumber, args.num_files, filename))
         data = wrangle(filename, tests=args.unit_tests)
 
         # make sure the file passes all tests
@@ -59,23 +59,25 @@ def process_queue(filequeue, resultsqueue):
                     if not rows[test][root_node][transitions]: continue
                     root_transitions = data.prop_map[root_node]['props'][test][root_node][transitions]['transitions']
                     for k in rows[test][root_node][transitions]:
-                        all_rows[test][root_transitions][transitions][k].append(rows[test][root_node][transitions][k])
-    resultsqueue.put(json.loads(json.dumps((all_rows, lexicon, transitions_groups))))
+                        new_rows[test][root_transitions][transitions][k] = rows[test][root_node][transitions][k]
+
+        print("Process {} finished file {} of {}: {}".format(current_process().name, filenumber, args.num_files, filename))
+        resultsqueue.put(json.loads(json.dumps((new_rows, lexicon, transitions_groups))))
 
 def process_queue2(q):
     while True:
-        try:
-            # TODO: technically, 2 seconds could not be enough. but realistically...
-            datasets, lexicon, root_lex, conf = q.get(True, 2)
-        except queue.Empty:
+        item = q.get()
+        if item is False:
             return
+        datasets, lexicon, root_lex, conf = item
 
         lex = generate_lexicon(lexicon, root_lex)
         for k in lex['token_to_index']:
             conf[k + '_size'] = len(lex['token_to_index'][k])
         conf['lexicon'] = lex
 
-        path = os.path.join(args.store_path, 'tests', conf['test'], conf['root_transitions_idx'], 'true' if conf['transitions'] else 'false')
+        path = os.path.join(args.store_path, 'tests', conf['test'], conf['root_transitions_idx'], conf['transitions'])
+        print(path)
         os.makedirs(path, exist_ok=True)
 
         sizes = conf['dataset_sizes']
@@ -83,7 +85,7 @@ def process_queue2(q):
             writer = tf.python_io.TFRecordWriter(os.path.join(path, dataset + '_data.tfrecord'))
             data = datasets[dataset]
             for i in range(sizes[dataset]):
-                print("Writing row {} of {} for dataset {}".format(i+1, sizes[dataset], dataset))
+                #print("Writing row {} of {} for dataset {}".format(i+1, sizes[dataset], dataset))
                 row = {}
                 for k in data:
                     row[k] = data[k][i]
@@ -151,38 +153,44 @@ def main():
     lexicon = data_dict(lambda: {'label': lex_ctr(), 'attr': lex_ctr(), 'transitions': lex_ctr()})
     transitions_groups = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int))))
 
+    # get the total lexicon
+    root_lexicon = collections.defaultdict(lambda: collections.defaultdict(lex_ctr))
+
     while len(processes) > 0:
         try:
-            a,l,t = resultsqueue.get(True, .01)
+            a,l,t = resultsqueue.get(True, 1)
             for test in a:
                 for root_trans in a[test]:
                     for transitions in a[test][root_trans]:
                         for k in a[test][root_trans][transitions]:
-                            all_rows[test][root_trans][transitions == 'true'][k].extend(a[test][root_trans][transitions][k])
+                            all_rows[test][root_trans][transitions][k].append(a[test][root_trans][transitions][k])
                         lex = l[test][root_trans][transitions]
                         for k in lex:
                             for token in lex[k]:
-                                lexicon[test][root_trans][transitions == 'true'][k][token] += lex[k][token]
-            for t1 in t:
-                for t2 in t[t1]:
-                    for t3 in t[t1][t2]:
-                        for t4 in t[t1][t2][t3]:
-                            transitions_groups[t1][t2][t3][t4] += t[t1][t2][t3][t4]
+                                lexicon[test][root_trans][transitions][k][token] += lex[k][token]
+                    lex = lexicon[test][root_trans]
+                    for k in ['attr', 'label']:
+                        for token in lex['false'][k]:
+                            root_lexicon[test][k][token] += lex['false'][k][token]
+                    for token in lex['true']['transitions']:
+                        root_lexicon[test]['transitions'][token] += lex['true']['transitions'][token]
+                    for t1 in t:
+                        for t2 in t[t1]:
+                            for t3 in t[t1][t2]:
+                                for t4 in t[t1][t2][t3]:
+                                    transitions_groups[t1][t2][t3][t4] += t[t1][t2][t3][t4]
         except queue.Empty:
-            for p in set(processes):
-                if not p.is_alive():
-                    processes.remove(p)
+            if filequeue.empty():
+                for p in set(processes):
+                    if not p.is_alive():
+                        p.join()
+                        processes.remove(p)
+                    else:
+                        print('Process {} is still alive'.format(p.name))
+                print('Processes remaining: {}'.format(len(processes)))
 
-    # get the total lexicon
-    root_lexicon = collections.defaultdict(lambda: collections.defaultdict(lex_ctr))
+    print('Generating root lexicon')
     for test in lexicon:
-        for root_transitions in lexicon[test]:
-            lex = lexicon[test][root_transitions]
-            for k in ['attr', 'label']:
-                for token in lex[False][k]:
-                    root_lexicon[test][k][token] += lex[False][k][token]
-            for token in lex[True]['transitions']:
-                root_lexicon[test]['transitions'][token] += lex[True]['transitions'][token]
         root_lexicon[test] = generate_lexicon(root_lexicon[test])
 
     q = Queue(maxsize=0)
@@ -192,15 +200,16 @@ def main():
         p.start()
         processes.add(p)
 
+    print('Drafting configs')
     config = vars(args)
     config['root_lexicon'] = root_lexicon
     config['tests'] = data_dict(lambda: False)
-    for test in lexicon:
+    for test in all_rows:
         root_lex = root_lexicon[test]['token_to_index']
-        for root_transitions in lexicon[test]:
+        for root_transitions in all_rows[test]:
             if root_transitions == '<unk>': continue
-            for transitions in [False, True]:
-                if transitions and test == 'null' or root_transitions not in root_lex['transitions']:
+            for transitions in all_rows[test][root_transitions]:
+                if transitions == 'true' and test == 'null' or root_transitions not in root_lex['transitions']:
                     continue
 
                 rows = all_rows[test][root_transitions][transitions]
@@ -222,19 +231,24 @@ def main():
                 root_transitions_idx = str(root_lex['transitions'][root_transitions])
                 config['tests'][test][root_transitions_idx][transitions] = True
 
-
                 conf = {}
                 conf['dataset_sizes'] = dataset_sizes
                 conf['test'] = test
                 conf['root_transitions'] = root_transitions
                 conf['root_transitions_idx'] = root_transitions_idx
                 conf['transitions'] = transitions
-                if transitions:
+                if transitions == 'true':
                     conf['transitions_groups'] = transitions_groups[test]
+                print('Finished config for {} {} {}'.format(test, root_transitions_idx, transitions))
                 q.put(json.loads(json.dumps((datasets, lexicon[test][root_transitions][transitions], root_lex, conf))))
+    for i in range(args.num_processes):
+        q.put(False)
 
+    print('Dumping overall config')
     with open(os.path.join(args.store_path, 'config.json'), 'w') as f:
         json.dump(config, f)
 
+    print('Joining subprocesses')
     for p in processes:
         p.join()
+        print('Process joined')

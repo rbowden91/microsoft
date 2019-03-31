@@ -104,11 +104,11 @@ class WrangledAST(object):
             return self.get_transitions_groups(node.new) if node.new is not None else None
         if node.__class__.__name__ in transition_classes:
             for test in self.tests:
-                transitions = node.node_properties['props'][test][node.node_properties['node_num']][True]
+                transitions = node.node_properties['props'][test][node.node_properties['node_num']]['true']
                 if transitions:
                     tg = self.transitions_groups[test][transitions['transitions']]
                     for test2 in self.tests:
-                        transitions2 = node.node_properties['props'][test2][node.node_properties['node_num']][True]
+                        transitions2 = node.node_properties['props'][test2][node.node_properties['node_num']]['true']
                         if transitions2:
                             tg[test2][transitions2['transitions']] += 1
 
@@ -248,11 +248,11 @@ class WrangledAST(object):
         for test in self.tests:
             for ancestor in (transitions_ancestry[:idx] if test != 'null' else [self.ast]):
                 ancestor_node_num = ancestor.node_properties['node_num']
-                for transitions in [True, False]:
+                for transitions in args[test][ancestor]:
                     arg = args[test][ancestor][transitions]
                     up_arg = update_args[test][ancestor][transitions] = {'parent': arg['parent']}
 
-                    if (transitions and className not in transition_classes) or \
+                    if (transitions == 'true' and className not in transition_classes) or \
                             (test != 'null' and (arg['parent'] is False or \
                             test not in nprops['visited'])):
                         arg['parent'] = False
@@ -327,7 +327,7 @@ class WrangledAST(object):
             for ancestor in args[test]:
                 ancestor_node_num = ancestor.node_properties['node_num']
                 for transitions in args[test][ancestor]:
-                    if transitions and test == 'null': continue
+                    if transitions == 'true' and test == 'null': continue
                     arg = args[test][ancestor][transitions]['nodes']
                     if len(arg['forward']) <= 1: continue
                     arg['forward'][0] = arg['reverse'][0] = None
