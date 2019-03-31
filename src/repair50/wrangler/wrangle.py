@@ -23,7 +23,6 @@ def process_ast(ast, lexicon=None, transitions_groups=None, lock=None):
                 nodes_ = ast.nodes[test][root_node][transitions]
                 if not nodes_: continue
 
-
                 root_transitions = ast.prop_map[root_node]['props'][test][root_node][transitions]['transitions']
                 new_row = all_new_rows[test][root_node][transitions]
 

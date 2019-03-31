@@ -1,75 +1,121 @@
 [
     {
-        "name": "test1",
-        "stdin": "a",
-        "argv": "./vigenere a",
-        "expected_stdout": "a\\\\n",
-        "expected_return": 0,
-        "check50": true,
-        "description": ""
+    	"argc==1": {
+	    "argv": "./vigenere",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdout", "value": [".+", "\\\\n"]},
+		{"type": "return", "value": 1}
+	    ]
+	},
+    	"argc==4": {
+	    "argv": "./vigenere a b c",
+	    "check50": false,
+	    "description": "",
+	    "run": [
+		{"type": "stdout", "value": [".+", "\\\\n"]},
+		{"type": "return", "value": 1}
+	    ]
+	}
     },
     {
-        "name": "test2",
-        "stdin": "barfoo",
-        "argv": "./vigenere baz",
-        "expected_stdout": "caqgon\\\\n",
-        "expected_return": 0,
-        "check50": true
+    	"key isn't alphabetical": {
+	    "argv": "./vigenere HaX0r2",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdout", "value": [".+", "\\\\n"]},
+		{"type": "return", "value": 1}
+	    ]
+	}
     },
     {
-        "name": "test3",
-        "stdin": "BaRFoo",
-        "argv": "./vigenere BaZ",
-        "expected_stdout": "CaQGon\\\\n",
-        "expected_return": 0,
-        "check50": true
+    	"a,a,a": {
+	    "argv": "./vigenere a",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "a"},
+		{"type": "stdout", "value": "a\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+	"A,A,A": {
+	    "argv": "./vigenere A",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "A"},
+		{"type": "stdout", "value": "A\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+	"A,!,!": {
+	    "argv": "./vigenere A",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "!"},
+		{"type": "stdout", "value": "!\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	}
     },
     {
-        "name": "test4",
-        "stdin": "BARFOO",
-        "argv": "./vigenere BAZ",
-        "expected_stdout": "CAQGON\\\\n",
-        "expected_return": 0,
-        "check50": true
+	"baz,barfoo,caqgon": {
+	    "argv": "./vigenere baz",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "barfoo"},
+		{"type": "stdout", "value": "caqgon\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+	"BAZ,BARFOO,CAQGON": {
+	    "argv": "./vigenere BAZ",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "BARFOO"},
+		{"type": "stdout", "value": "CAQGON\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	}
     },
     {
-        "name": "test5",
-        "stdin": "world!$?",
-        "argv": "./vigenere baz",
-        "expected_stdout": "xoqmd!\\$\\?\\\\n",
-        "expected_return": 0,
-        "check50": true
+	"BaZ,BaRFoo,CaQGon": {
+	    "argv": "./vigenere BaZ",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "BaRFoo"},
+		{"type": "stdout", "value": "CaQGon\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+	"baz,worl!d,xoqm!d": {
+	    "argv": "./vigenere baz",
+	    "check50": false,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "worl!d"},
+		{"type": "stdout", "value": "xoqm!d\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	}
     },
     {
-        "name": "test6",
-        "stdin": "world, say hello!",
-        "argv": "./vigenere baz",
-        "expected_stdout": "xoqmd, rby gflkp!\\\\n",
-        "expected_return": 0,
-        "check50": true
-    },
-    {
-        "name": "test7",
-        "stdin": "",
-        "argv": "./vigenere",
-        "expected_stdout": ".+\\\\n",
-        "expected_return": 1,
-        "check50": true
-    },
-    {
-        "name": "test8",
-        "stdin": "",
-        "argv": "./vigenere 1 2 3",
-        "expected_stdout": ".+\\\\n",
-        "expected_return": 1,
-        "check50": true
-    },
-    {
-        "name": "test9",
-        "stdin": "",
-        "argv": "./vigenere HaX0r2",
-        "expected_stdout": ".+\\\\n",
-        "expected_return": 1,
-        "check50": true
+	"baz,\"World, Say Hello!\",\"Xoqmd, Rby Gflkp!\"": {
+	    "argv": "./vigenere baz",
+	    "check50": false,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "World, Say Hello!"},
+		{"type": "stdout", "value": "Xoqmd, Rby Gflkp!\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	}
     }
 ]

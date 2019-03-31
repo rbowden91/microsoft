@@ -44,7 +44,7 @@ def process_queue(queue, lexicon, transitions_groups, lock, tests):
         data = wrangle(filename, tests=tests)
 
         # make sure the file passes all tests
-        passed_all = functools.reduce(lambda y, test: test['passed'] and y, data.results, True)
+        passed_all = functools.reduce(lambda y, test_group: functools.reduce(lambda y, test: test_group[test]['passed'] and y, test_group, True) and y, data.results, True)
         if not passed_all:
             print(filename + ' failed checks.')
             queue['queue'].task_done()
@@ -66,7 +66,8 @@ def generate_lexicon(lex, root_lex=None):
         if root_lex:
             s = set([label for label in lex[k] if label in root_lex[k]])
         else:
-            cutoff = args.num_files * args.unk_cutoff
+            # FIXME: this cutoff isn't calculated correctly
+            cutoff = 0#args.num_files * args.unk_cutoff
             s = set([label for label in lex[k] if lex[k][label] > cutoff]) if k in ['attr', 'transitions'] else set(lex[k])
         if '<nil>' in s:
             s.remove('<nil>')

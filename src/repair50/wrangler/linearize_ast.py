@@ -45,27 +45,30 @@ arg_dict = lambda: data_dict(lambda: collections.defaultdict(int, nodes=nodes_li
 
 
 def canonicalize_snapshots(node, test):
-    if node.__class__.__name__ == 'FileAST': return '<nil>'
+    if node.__class__.__name__ == 'FileAST': return '<FileAST>'
 
     if 'snapshots' not in node.node_properties or test not in node.node_properties['snapshots']:
         return '<unk>'
 
-
     transitions = []
     for snap in node.node_properties['snapshots'][test]:
-        ret = ''
-        if test not in ['test7', 'test8', 'test9']:
-            ret += snap['stdout'] + '\n'
-            ret += snap['stderr'] + '\n'
-        ret += (str(snap['return']) if snap['return'] is not False else '') + '\n'
+        locals_ = []
         for func_scope in snap['scope']:
             for scope in func_scope:
                 for key in scope:
-                    ret += str(scope[key]['before']) + ' ' + str(scope[key]['after']) + '\n'
+                    locals_.append(str(scope[key]['before']) + '->' + str(scope[key]['after']))
+        memory = []
         for array in snap['memory']:
             for key in snap['memory'][array]:
                 vals = snap['memory'][array][key]
-                ret += str(vals['before']) + ' ' + str(vals['after']) + '\n'
+                memory.append(str(vals['before']) + '->' + str(vals['after']))
+        memory.extend(locals_)
+        # make changes to variables agnostic of order
+        memory.sort()
+        ret = ' locals: ' + ','.join(memory) + '\n'
+        ret += ' stdout: ' + snap['stdout'] + '\n'
+        ret += ' stderr: ' + snap['stderr'] + '\n'
+        ret += ' return: ' + (str(snap['return']) if snap['return'] is not False else '') + '\n'
         if ret not in transitions:
             transitions.append(ret)
     transitions.sort()
@@ -81,8 +84,9 @@ class WrangledAST(object):
         self.tests = set(['null'])
         self.num_nodes = 1
 
-        for result in results:
-            self.tests.add(result['name'])
+        for result_group in results:
+            for result_name in result_group:
+                self.tests.add(result_name)
 
         self.generic_visit()
         self.transitions_groups = collections.defaultdict(lambda: collections.defaultdict(lambda:
@@ -249,9 +253,8 @@ class WrangledAST(object):
                     up_arg = update_args[test][ancestor][transitions] = {'parent': arg['parent']}
 
                     if (transitions and className not in transition_classes) or \
-                        (test != 'null' and className not in ['FileAST', 'FuncDef'] and
-                        (arg['parent'] is False or \
-                            'visited' not in nprops or test not in nprops['visited'])):
+                            (test != 'null' and (arg['parent'] is False or \
+                            test not in nprops['visited'])):
                         arg['parent'] = False
                         continue
 
@@ -326,7 +329,6 @@ class WrangledAST(object):
                 for transitions in args[test][ancestor]:
                     if transitions and test == 'null': continue
                     arg = args[test][ancestor][transitions]['nodes']
-                    # just the root and the nil slot
-                    if len(arg['forward']) <= 2: continue
+                    if len(arg['forward']) <= 1: continue
                     arg['forward'][0] = arg['reverse'][0] = None
                     self.nodes[test][ancestor_node_num][transitions] = arg
