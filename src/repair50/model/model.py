@@ -65,13 +65,12 @@ class TRNNBaseModel(object):
         probabilities = {}
         # mask is the same regardless of direction
         mask = tf.cast(self.rows['forward']['mask'], tf.float32)
-        ptr_mask = tf.tile(tf.expand_dims(mask,axis=2), [1,1,self.mem_size]) * self.pointer_mask
         total_loss = 0.0
         for k in labels:
             mask2 = mask
             if k == 'pointers':
                 cross, predict = (tf.nn.sigmoid_cross_entropy_with_logits, tf.nn.sigmoid)
-                mask2 = ptr_mask
+                mask2 = tf.tile(tf.expand_dims(mask,axis=2), [1,1,self.mem_size]) * self.pointer_mask
             elif self.is_joint:
                 cross, predict = (tf.nn.softmax_cross_entropy_with_logits, tf.nn.softmax)
             else:
