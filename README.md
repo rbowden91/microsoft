@@ -54,3 +54,22 @@ python3 tree_read.py ../vigenere/correct15/ ../data/tree5
     Generates data files (where tokens have been converted to ids) from the tree_stripped.json files.
     The "num_files" argument at the top of the file can be used to control how many files in the input_path should be
     used.
+
+
+
+<!--
+#cgroup_tools...
+sudo apt-get install -y cgroup-tools
+# edit /etc/default/grub to have:
+# GRUB_CMDLINE_LINUX_DEFAULT="cgroup_enable=memory swapaccount=1"
+# then do:
+sudo update-grub
+sudo reboot
+sudo cgcreate -t rbowden:rbowden -a rbowden:rbowden -g memory:repair50
+# 20 GB physical ram
+echo $(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.limit_in_bytes
+# 20 GB swap (has to be less than the above)
+echo $(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.memsw.limit_in_bytes
+cgexec -g memory:repair50 <process>
+
+-->

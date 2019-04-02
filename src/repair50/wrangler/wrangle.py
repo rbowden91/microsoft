@@ -7,13 +7,18 @@ from ..preprocessor.external import ExternalCPP # type:ignore
 from centipyde.interpreter import run_tests # type:ignore
 from .normalizers import normalize
 from .linearize_ast import WrangledAST
-from ..default_dict import data_dict
+from ..default_dict import get_dict, get_dict_default
 
-def process_ast(ast, lexicon=None, transitions_groups=None):
-    all_new_rows = data_dict(lambda: collections.defaultdict(list))
+def add_to_row(rows, key, val):
+    feature_row = get_dict_default(rows, key, [])
+    feature_row[key].append(int(val) if isinstance(val, bool) else val)
+
+def process_ast(ast, lexicon=None):
+    all_new_rows = {}
 
     for test in ast.nodes:
-        for root_node in list(ast.nodes[test].keys()):
+        for root_node in ast.nodes[test]:
+            root_transitions = ast.prop_map[root_node]['test_data'][test]['transitions']
             for transitions in ast.nodes[test][root_node]:
                 local_lexicon = {
                     'label': set(),
@@ -21,56 +26,40 @@ def process_ast(ast, lexicon=None, transitions_groups=None):
                     'transitions': set()
                 }
                 nodes_ = ast.nodes[test][root_node][transitions]
-                if not nodes_: continue
 
-                root_transitions = ast.prop_map[root_node]['props'][test][root_node][transitions]['transitions']
-                new_row = all_new_rows[test][root_node][transitions]
+                new_rows = get_dict(all_new_rows, test, root_node, transitions)
 
                 for k in ['reverse', 'forward']:
                     nodes = nodes_[k]
                     # skip the nil slot
                     nodes.pop(0)
-
                     for node in nodes:
                         for feature, val in node.items():
-                            if feature in ['snapshots']: continue
                             if val is None:
                                 node[feature] = '<nil>'
                             if lexicon is not None and feature in local_lexicon and val not in local_lexicon[feature]:
-                                lexicon[test][root_transitions][transitions][feature][val] += 1
+                                l = get_dict_default(lexicon, test, root_transitions, transitions, feature, val, 0)
+                                l[val] += 1
                                 local_lexicon[feature].add(val)
 
                             if feature not in ['forward', 'reverse']:
-                                new_row[k + '-' + feature].append(int(val) if isinstance(val, bool) else val)
+                                add_to_row(new_rows, k + '-' + feature, val)
                             else:
                                 if feature != k: continue
                                 for dep, dep_val in val.items():
                                     if dep == 'pointers':
-                                        # FIXME: release limit of pointer memory of 20
-                                        if len(dep_val['memory']) < 20:
-                                            dep_val['memory'].extend([0] * (20 - len(dep_val['memory'])))
-                                            dep_val['mask'].extend([0] * (20 - len(dep_val['mask'])))
-                                        if k == 'forward':
-                                            dep_val['memory'] = dep_val['memory'][-20:]
-                                            dep_val['mask'] = dep_val['mask'][-20:]
-                                        else:
-                                            dep_val['memory'] = dep_val['memory'][:20]
-                                            dep_val['mask'] = dep_val['mask'][:20]
-
-                                        for q in range(len(dep_val['memory'])):
-                                            # TODO: use sequence example instead or something?
-                                            new_row['-'.join([k,dep,'memory',str(q)])].append(dep_val['memory'][q])
-                                            new_row['-'.join([k,dep,'mask',str(q)])].append(dep_val['mask'][q])
+                                        mem_size = len(dep_val['memory'])
+                                        dep_val['filter'] = [1] * mem_size
+                                        for ptr_val in dep_val:
+                                            # FIXME: release limit of pointer memory of 20
+                                            if len(dep_val[ptr_val]) < 20:
+                                                dep_val[ptr_val].extend([0] * (20 - len(dep_val[ptr_val])))
+                                            dep_val[ptr_val] = dep_val[ptr_val][-20:]
+                                            for q in range(len(dep_val[ptr_val])):
+                                                # TODO: use sequence example instead or something?
+                                                add_to_row(new_rows, '-'.join([k,dep,ptr_val,str(q)]), dep_val[ptr_val][q])
                                     else:
-                                        new_row['-'.join([k,dep])].append(int(dep_val) if isinstance(dep_val, bool) else dep_val)
-
-
-    if transitions_groups:
-        for test in ast.transitions_groups:
-            for transition in ast.transitions_groups[test]:
-                for test2 in ast.transitions_groups[test][transition]:
-                    for transition2 in ast.transitions_groups[test][transition][test2]:
-                        transitions_groups[test][transition][test2][transition2] += ast.transitions_groups[test][transition][test2][transition2]
+                                        add_to_row(new_rows, k + '-' + dep, int(dep_val) if isinstance(dep_val, bool) else dep_val)
 
     return all_new_rows
 
@@ -88,23 +77,16 @@ def tokens_to_ids(tokens, token_to_id):
         output.append(id)
     return output
 
-def finish_row(row, lexicon, root_lexicon):
+def finish_row(row, lexicon):
     # all rows should have a forward label
     row_len = len(row['forward-label'])
 
     for i in ['forward-', 'reverse-']:
         for j in ['parent_', '']:
-            for k in ['label', 'attr', 'transitions', 'root_transitions']:
+            for k in ['label', 'attr', 'transitions']:
                 idx = i + j + k
                 if idx in row:
-                    if k == 'root_transitions':
-                        key = 'transitions'
-                        lex = root_lexicon
-                    else:
-                        key = k
-                        lex = lexicon
-
-                    row[idx + '_index'] = tokens_to_ids(row[idx], lex[key])
+                    row[idx + '_index'] = tokens_to_ids(row[idx], lexicon[k])
                     del(row[idx])
                 else:
                     row[idx + '_index'] = [0] * row_len

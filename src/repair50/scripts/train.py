@@ -15,7 +15,10 @@ import argparse
 import time
 import json
 import math
-import collections
+
+# suppress tensorflow messages, finally
+import logging
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 from multiprocessing import Process, Queue
 import queue
@@ -64,31 +67,30 @@ logging = tf.logging
 
 class Trainer(object):
 
-    def __init__(self, config, train_config):
+    def __init__(self, config):
         self.config = config
-        self.train_config = train_config
         self.test = config['test']
         self.transitions = config['transitions']
         self.root_idx = config['root_idx']
 
         self.graph = tf.Graph()
         with self.graph.as_default():
-            initializer = tf.random_uniform_initializer(-train_config['init_scale'],
-                                                        train_config['init_scale'])
+            initializer = tf.random_uniform_initializer(-config['train_config']['init_scale'],
+                                                        config['train_config']['init_scale'])
             self.models = {'dependency_configs': {}, 'joint_configs': {}}
             with tf.variable_scope("TRNNModel/{}/{}/{}".format(self.transitions, 'test' if True else self.test, self.root_idx), reuse=None, initializer=initializer):
                 rows = None
-                for i in train_config['dependency_configs']:
+                for i in config['train_config']['dependency_configs']:
                     self.models['dependency_configs'][i] = TRNNModel(
-                        i, config, self.transitions == 'true', rows=rows
+                        i, config, self.transitions == 'true', self.test == 'null', rows=rows
                     )
                     if rows is None:
                         rows = self.models['dependency_configs'][i].rows
                         self.iter_model = self.models['dependency_configs'][i]
-                for i in train_config['joint_configs']:
+                for i in config['train_config']['joint_configs']:
                     self.models['joint_configs'][i] = TRNNJointModel(
                         self.models['dependency_configs'],
-                        i, config, self.transitions == 'true', rows=rows
+                        i, config, self.transitions == 'true', self.test == 'null', rows=rows
                     )
 
 
@@ -238,7 +240,7 @@ class Trainer(object):
                 summary, vals, _ = self.session.run([summary_op, fetches, train_ops], feed_dict)
                 self.writer.add_summary(summary, epoch_step * self.batch_size)
 
-            if self.train_config['profile'] and mode == 'train':
+            if self.config['train_config']['profile'] and mode == 'train':
                 self.run_profiler()
 
             if verbose:
@@ -258,13 +260,13 @@ class Trainer(object):
 
 
     def run_epoch_mode(self, mode, verbose=False):
-        self.batch_size = self.train_config['batch_size'] if mode == 'train' else 1
+        self.batch_size = self.config['train_config']['batch_size'] if mode == 'train' else 1
         self.session.run(self.iter_model.ops['batch_size_update'],
                         feed_dict={ self.iter_model.placeholders['new_batch_size'] : self.batch_size })
         total_perplexity = 0
         #if root_idx != '0': continue
         self.epoch_size = self.config['dataset_sizes'][mode] // self.batch_size
-        filename = os.path.join(args.data_path, 'tests', self.test, self.root_idx, self.transitions, mode + '_data.tfrecord')
+        filename = os.path.join(args.data_path, self.test, self.root_idx, self.transitions, mode + '.tfrecord')
         self.session.run(self.iter_model.ops['file_iter'],
                         feed_dict={ self.iter_model.placeholders['filename'] : filename })
 
@@ -287,29 +289,21 @@ class Trainer(object):
 
 def process_queue(q):
     while True:
-        item = q.get()
-        if item is False: return
-        conf, config = item
+        conf = q.get()
+        if conf is False: return
 
-        trainer = Trainer(conf, config)
-        for i in range(config['epochs']):
+        with open(conf['model_config_file'], 'w') as f:
+            json.dump(conf, f)
+
+        trainer = Trainer(conf)
+        for i in range(conf['train_config']['epochs']):
             if trainer.run_epoch():
                 break
         trainer.finish()
 
 def main():
-    with open(os.path.join(args.data_path, 'config.json')) as f:
-        config = json.load(f)
     # Note that at this point, the training, validation, and test data have already been split up.
-    # So, we preserve the ratios between them.
-    config.update(vars(args))
-
-    save_path = os.path.join(args.data_path, args.save_path)
-
-    os.makedirs(save_path, exist_ok=True)
-    with open(os.path.join(save_path, 'config.json'), 'w') as f:
-        json.dump(config, f)
-
+    # So, we preserve the ratios between them. TODO: this is now broken I think
     q = Queue(maxsize=0)
 
     processes = []
@@ -319,28 +313,24 @@ def main():
         p.start()
         processes.append(p)
 
-    for test in config['tests']:
-        if config['subtests'] is not None and test not in config['subtests']: continue
-        for root_idx in config['tests'][test]:
-            for transitions in config['tests'][test][root_idx]:
-                if config['tests'][test][root_idx][transitions] is False: continue
-                path = os.path.join(save_path, 'tests', test, root_idx, transitions)
+    tests = os.listdir(args.data_path) if args.subtests is None else args.subtests
+    for test in tests:
+        for root_idx in os.listdir(os.path.join(args.data_path, test)):
+            if root_idx == 'config.json': continue
+            for transitions in os.listdir(os.path.join(args.data_path, test, root_idx)):
+                path = os.path.join(args.data_path, test, root_idx, transitions, args.save_path)
 
-                best_dir = os.path.join(path, 'best/')
-                model_config_file = os.path.join(best_dir, 'config.json')
+                model_config_file = os.path.join(path, 'config.json')
 
                 if args.checkpoint and os.path.isfile(model_config_file):
                     with open(model_config_file) as f:
                         conf = json.load(f)
                 else:
                     # TODO: delete save_path?
-                    data_path = os.path.join(args.data_path, 'tests', test, root_idx, transitions)
-                    with open(os.path.join(data_path, 'config.json')) as f:
+                    with open(os.path.join(args.data_path, test, root_idx, transitions, 'config.json')) as f:
                         conf = json.load(f)
 
-                    for k in ['num_layers', 'max_grad_norm', 'hidden_size']:
-                        conf[k] = config[k]
-
+                    best_dir = os.path.join(path, 'best/')
                     checkpoint_dir = os.path.join(path, 'checkpoints/')
                     log_dir = os.path.join(path, 'log/')
 
@@ -357,17 +347,16 @@ def main():
                         'best_dir': best_dir,
                         'log_dir': log_dir,
                         'model_config_file': model_config_file,
+                        'train_config': vars(args)
                     })
 
                     os.makedirs(checkpoint_dir, exist_ok=True)
                     os.makedirs(log_dir, exist_ok=True)
                     os.makedirs(best_dir, exist_ok=True)
-
-                    with open(model_config_file, 'w') as f:
-                        json.dump(conf, f)
-                q.put((conf, config))
+                q.put(conf)
 
     for p in processes:
         q.put(False)
+
     for p in processes:
         p.join()
