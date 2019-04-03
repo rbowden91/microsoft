@@ -22,8 +22,8 @@ server2:
 	#cgexec --sticky -g memory:repair50 repair50_shim -t"argc==1|argc==4|key isn't alphabetical|A,A,A|baz,barfoo,caqgon" -d cs50_data/training_data/vigenere1000 -stmp -p 12347
 	if [ ! -d "/sys/fs/cgroup/memory/repair50" ]; then
 	    sudo cgcreate -t rbowden:rbowden -a rbowden:rbowden -g memory:repair50
-	    echo \$(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.limit_in_bytes
-	    echo \$(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.memsw.limit_in_bytes
+	    echo $$(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.limit_in_bytes
+	    echo $$(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.memsw.limit_in_bytes
 	fi
 	cgexec --sticky -g memory:repair50 repair50_shim -t"argc==1|argc==4|key isn't alphabetical|A,A,A" -d cs50_data/training_data/vigenere1000 -stmp -p 12347
 
