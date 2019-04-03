@@ -65,11 +65,4 @@ sudo apt-get install -y cgroup-tools
 # then do:
 sudo update-grub
 sudo reboot
-sudo cgcreate -t rbowden:rbowden -a rbowden:rbowden -g memory:repair50
-# 20 GB physical ram
-echo $(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.limit_in_bytes
-# 20 GB swap (has to be less than the above)
-echo $(( 20 * 1024 * 1024 * 1024 )) > /sys/fs/cgroup/memory/repair50/memory.memsw.limit_in_bytes
-cgexec -g memory:repair50 <process>
-
 -->

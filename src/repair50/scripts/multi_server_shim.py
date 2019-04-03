@@ -8,6 +8,7 @@ import selectors
 import traceback
 import time
 import signal
+import uuid
 
 #from multiprocessing import Process, Queue
 from queue import Queue
@@ -16,7 +17,8 @@ from typing import Dict
 
 NUM_PROCESSES = 1
 HOST = ''
-servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12347)]
+#servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12347)]
+servers = [('appa.rbowden.com', 12347)]
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)
@@ -48,6 +50,7 @@ def start_worker(q):
     while True:
         sock, input_ = q.get()
         if not send_json(sock, input_):
+            print(sock, input_)
             # TODO: close socket
             #if sock in reverse_client_map:
             #    del(client_map[reverse_client_map[sock]])
@@ -63,9 +66,9 @@ def server_connect():
             if server in reverse_server_map: continue
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setblocking(False)
-            sock.connect_ex(server)
             reverse_server_map[server] = sock
             server_map[sock] = server
+            sock.connect_ex(server)
             sel.register(sock, selectors.EVENT_READ, data={'input':b'', 'type':'server'})
         time.sleep(2)
 
@@ -73,6 +76,17 @@ server_map = {} # type:ignore
 reverse_server_map = {} # type:ignore
 client_map = {} # type:ignore
 reverse_client_map = {} # type:ignore
+
+opaque_map = {}
+
+def close_socket(sock):
+    if sock in client_map:
+        del(client_map[sock])
+    elif sock in server_map:
+        del(reverse_server_map[server_map[sock]])
+        del(server_map[sock])
+    sel.unregister(sock)
+    sock.close()
 
 # TODO: disconnect after timeout, messages too long, etc.
 # TODO: kill subprocesses?
@@ -110,35 +124,37 @@ def main():
                 sel.register(conn, selectors.EVENT_READ, data={'input':b'', 'type':'client'})
             else:
                 if mask & selectors.EVENT_READ:
+                    recv_data = ''
                     try:
                         recv_data = sock.recv(4096)  # Should be ready to read
-                        if len(recv_data) == 0:
-                            raise Exception
-                        data['input'] += recv_data
-                        input_ = data['input'].split(b'\n\n')
-                        while len(input_) > 1:
-                            # TODO: prevent further reading from this socket until the current command is handled
-                            json_input = input_.pop(0)
-                            json_input = json.loads(json_input)
-                            assert 'session_id' in json_input
-
-                            if data['type'] == 'client':
-                                client_map[json_input['session_id']] = sock
-                                for sock in server_map:
-                                    q.put((sock, json_input))
-                            else:
-                                assert data['type'] == 'server'
-                                if json_input['session_id'] not in client_map: continue
-                                client_sock = client_map[json_input['session_id']]
-                                q.put((client_sock, json_input))
-                        data['input'] = input_[0]
-
                     except Exception as e:
-                        #print(e)
-                        if sock in client_map:
-                            del(client_map[sock])
-                        elif sock in server_map:
-                            del(reverse_server_map[server_map[sock]])
-                            del(server_map[sock])
-                        sel.unregister(sock)
-                        sock.close()
+                        # this is fine
+                        pass
+
+                    if len(recv_data) == 0:
+                        close_socket(sock)
+                        continue
+
+                    data['input'] += recv_data
+                    input_ = data['input'].split(b'\n\n')
+                    data['input'] = input_.pop()
+                    for i in range(len(input_)):
+                        # TODO: prevent further reading from this socket until the current command is handled
+                        json_input = json.loads(input_[i])
+                        assert 'opaque' in json_input
+
+                        if data['type'] == 'client':
+                            new_opaque = uuid.uuid4().hex
+                            old_opaque = json_input['opaque']
+                            client_map[new_opaque] = (sock, old_opaque)
+                            json_input['opaque'] = new_opaque
+                            for sock in server_map:
+                                q.put((sock, json_input))
+                        else:
+                            assert data['type'] == 'server'
+                            new_opaque = json_input['opaque']
+                            if new_opaque not in client_map: continue
+                            client_sock, old_opaque = client_map[new_opaque]
+                            json_input['opaque'] = old_opaque
+
+                            q.put((client_sock, json_input))
