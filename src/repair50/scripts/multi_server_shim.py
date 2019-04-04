@@ -17,8 +17,7 @@ from typing import Dict
 
 NUM_PROCESSES = 1
 HOST = ''
-#servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12347)]
-servers = [('appa.rbowden.com', 12347)]
+servers = [('korra.rbowden.com', 12347), ('appa.rbowden.com', 12347), ('aang.rbowden.com', 12347)]
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-p', '--port', help='port number (default 12344)', type=int, default=12344)
@@ -122,11 +121,13 @@ def main():
                 print('accepted connection from', addr)
                 conn.setblocking(False)
                 sel.register(conn, selectors.EVENT_READ, data={'input':b'', 'type':'client'})
+                #q.put((conn, {'num_servers': len(servers)}))
             else:
                 if mask & selectors.EVENT_READ:
                     recv_data = ''
                     try:
                         recv_data = sock.recv(4096)  # Should be ready to read
+                        print(recv_data)
                     except Exception as e:
                         # this is fine
                         pass

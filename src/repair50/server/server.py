@@ -217,8 +217,8 @@ class ServerProcess(object):
             elif handler == 'handle_input':
                 output = self.handle_input(*args)
                 if output is not False:
-                    socket, socket_data, *args = args
-                    self.origin_pipe.send((socket, socket_data, *output))
+                    request_data, *args = args
+                    self.origin_pipe.send((request_data, *output))
             else:
                 assert False
 
@@ -244,8 +244,9 @@ class ServerModelProcess(ServerProcess):
             saver.restore(test_conf['session'], os.path.join(test_conf['best_dir'], 'model'))
         log_print('Loaded model {} {} {}'.format(test_conf['test'], test_conf['root_idx'], test_conf['transitions']), 1)
 
-    def handle_input(self, socket, socket_data, opaque, code, rows, test,
+    def handle_input(self, request, rows, test,
                      root_node_idx, root_trans_idx, transitions):
+        response = {'model_ctr': 1}
         test_conf = self.test_config[test][root_trans_idx][transitions]
 
         log_print('Running model {} {} {}'.format(test, root_trans_idx, transitions), 0)
@@ -267,10 +268,8 @@ class ServerModelProcess(ServerProcess):
             idx = {'forward': row['forward-self'][i], 'reverse': row['reverse-self'][i]}
             props[idx['forward']] = prop = self.gather_props(self.test_config[test][root_trans_idx][transitions], vals, data_dict, idx)
             codeProps[node_nums[i-1]] = {'test_data': { test: { 'model_results': { root_node_idx: { transitions: prop } } } } };
-        output = { 'codeProps': codeProps, 'dependencyConfigOptions': dependencyConfigs }
-        if opaque is not None:
-            output['opaque'] = opaque
-        return [output]
+        response['output'] = { 'codeProps': codeProps, 'dependencyConfigOptions': dependencyConfigs }
+        return (response,)
 
     #for test in self.test_conf:
     #    for root_idx in rows[test]:
@@ -409,15 +408,16 @@ class ServerTestProcess(ServerProcess):
 
         log_print('Test {} initialized'.format(test), 1)
 
-    def handle_input(self, socket, socket_data, opaque, code):
+    def handle_input(self, request, code):
+        response = {'total_models': 0, 'test_ctr': 1}
         try:
             ast_data = wrangle(code, tests=self.unit_tests, is_file=False)
         except Exception as e:
-            return {'error': "Couldn't parse code." + str(e)}
+            response['output'] = {'error': "Couldn't parse code." + str(e)}
+            return (response, )
 
         rows = process_ast(ast_data)
 
-        send_data = 0
         for test in self.model_process_map:
             root_lex = self.test_config[test]['root_lex']['transitions']
             mpm = self.model_process_map[test]
@@ -439,19 +439,15 @@ class ServerTestProcess(ServerProcess):
                         continue
                     mpm[root_trans_idx][transitions]['queue'].put((
                         'handle_input',
-                        socket,
-                        socket_data,
-                        opaque,
-                        code,
+                        request,
                         rows[test][root_node_idx][transitions],
                         test,
                         root_node_idx,
                         root_trans_idx,
                         transitions,
                         ))
-                    send_data += 1
+                    response['total_models'] += 1
 
-        #output['total_model_data'] = send_data
         #codeProps = {}
         #print(ast_data.prop_map)
         #for node_num in ast_data.prop_map:
@@ -461,12 +457,10 @@ class ServerTestProcess(ServerProcess):
             #for k in ['pointers', 'replace_name', 'props']:
             #    if k in codeProps[node_num]:
             #        del(codeProps[node_num][k])
-        output = { 'codeProps': ast_data.prop_map, 'testResults': ast_data.results }
+        response['output'] = { 'codeProps': ast_data.prop_map, 'testResults': ast_data.results }
         if self.c_generator:
-            output['code'] = CGenerator(ast_data).code
-        if opaque is not None:
-            output['opaque'] = opaque
-        return [output]
+            response['output']['code'] = CGenerator(ast_data).code
+        return (response,)
 
 
 class ServerSocketProcess(ServerProcess):
@@ -476,59 +470,67 @@ class ServerSocketProcess(ServerProcess):
 
     # SENDING RESPONSE METHODS
 
-    def send_msg(self, socket,  msg):
-        assert isinstance(msg, dict)
-        msg = json.dumps(msg).encode('latin-1') + b'\n\n'
-        sleep_error = 0
-        # TODO: instead, put it to sleep (using EVENT_WRITE)?
-        while len(msg) > 0 and sleep_error <= 10:
-            try:
-                sent = socket.send(msg)
-                msg = msg[sent:]
-                sleep_error = 0
-            except:
-                sleep_error += 1
-                time.sleep(1)
-        return len(msg) == 0
+    def send_msg(self, socket_data):
+        while True:
+            out = socket_data['pending_output'][0]
+            if isinstance(out, dict):
+                out = json.dumps(out).encode('latin-1') + b'\n\n'
+            while len(out) > 0:
+                try:
+                    sent = socket_data['fd'].send(out)
+                    out = out[sent:]
+                except:
+                    break
+            if len(out) > 0:
+                socket_data['pending_output'][0] = out
+                return False
+            socket_data['pending_output'].pop(0)
+            if len(socket_data['pending_output']) == 0:
+                return True
 
     # HANDLING INPUT METHODS
     # accepting input from the origin server (must take self, data, and mask)
 
-    def handle_input(self, fileobj, fileobj_data, mask):
+    def handle_input(self, fileobj_data, mask):
+        fileobj  = fileobj_data['fd']
         if fileobj_data['type'] in [ServerTestProcess, ServerModelProcess]:
-            return self.handle_server_pipe(fileobj, fileobj_data, mask)
-        elif fileobj_data['type'] == 'client_socket':
-            return self.handle_client_socket(fileobj, fileobj_data, mask)
+            ret =self.handle_server_pipe(fileobj_data, mask)
         else:
-            assert False
-
-        method = getattr(self, handler)
-        return method(*args)
-
-    def handle_server_pipe(self, server_pipe, server_pipe_data, mask):
-        try:
-            socket, socket_data, output = server_pipe.recv()
-        except:
-            assert False
-            # TODO: "socket" is never re-registered?
-            return ['close_server_pipe']
-        self.origin_pipe.send((server_pipe, server_pipe_data, 'register_server_pipe'))
-        if self.send_msg(socket, output):
-            self.origin_pipe.send((socket, socket_data, 'register_client_socket'))
-        else:
-            self.origin_pipe.send((socket, socket_data, 'close_client_socket'))
-
+            assert fileobj_data['type'] == 'client_socket'
+            ret = self.handle_client_socket(fileobj_data, mask)
+        if ret:
+            return (*ret, mask)
         return False
 
-    def handle_client_socket(self, socket, socket_data, mask):
-        log_print('Handling input')
-        if mask & selectors.EVENT_READ:
+    def handle_server_pipe(self, server_pipe_data, mask):
+        assert mask & selectors.EVENT_READ
+        server_pipe = server_pipe_data['fd']
+        try:
+            request, response = server_pipe.recv()
+        except:
+            assert False
+            # TODO: a pipe socket shouldn't be closed??
+            return ('close',)
+        self.origin_pipe.send((request, 'done', response, mask))
+        return ('done',{})
+
+    def handle_client_socket(self, socket_data, mask):
+        response = {'output':[]}
+
+        if mask & selectors.EVENT_WRITE:
+            assert len(socket_data['pending_output']) > 0
+            self.send_msg(socket_data)
+            # try again later, though should probably kill it at some point
+            return ('done', response)
+
+        elif mask & selectors.EVENT_READ:
+            log_print('Handling input')
             while True:
                 try:
-                    recv_data = socket.recv(4096)
+                    recv_data = socket_data['fd'].recv(4096)
                     if not recv_data:
                         # client socket closed connection itself
-                        return ['close_client_socket']
+                        return ('close',)
                     # TODO reject if this gets too big
                     socket_data['input'] += recv_data
                 except:
@@ -537,35 +539,156 @@ class ServerSocketProcess(ServerProcess):
             try:
                 socket_data['input'].index(b'\n\n')
             except ValueError:
-                return ['register_client_socket']
+                return ('done', response)
 
             input_ = socket_data['input'].split(b'\n\n')
             socket_data['input'] = input_.pop()
             for i in range(len(input_)):
                 try:
                     input_[i] = json.loads(input_[i])
+                    while True:
+                        request_id = uuid.uuid4().hex
+                        if request_id not in socket_data['requests']:
+                            break
+                    response['output'].append({'type': 'request', 'status': 'started', 'id': request_id})
+                    input_[i]['request'] = {'type': 'request', 'id': request_id, 'fd_id': socket_data['id']}
+                    if 'opaque' in input_[i]:
+                        input_[i]['request']['opaque'] = input_[i]['opaque']
+                        # technically, we might want the server to keep track of this start message, but meh...
+                        response['output'].append(input_[i]['opaque'])
                 except:
-                    if not self.send_msg(socket, {'output': { 'error': 'Unable to parse input json'}}):
-                        return ['close_client_socket']
-            self.origin_pipe.send((socket, socket_data, 'register_client_socket'))
+                    # this is a race condition to insert into the socket_data while someone else could be writing
+                    response['output'].append({'output': { 'error': 'Unable to parse input json'}})
+                    input_[i] = None
+
+            self.origin_pipe.send((socket_data, 'done', response, mask))
 
             for i in range(len(input_)):
-                if 'opaque' not in input_[i]:
-                    input_[i]['opaque'] = None
+                if input_[i] is None: continue
                 for tp in self.test_processes:
-                    tp['queue'].put(('handle_input', socket, socket_data, input_[i]['opaque'], input_[i]['code']))
-
+                    request = input_[i]['request']
+                    tp['queue'].put(('handle_input', request, input_[i]['code']))
             return False
 
-        #elif mask & selectors.EVENT_WRITE:
-            #pass
-            #self.send_msg(data
-            #send_
+
+class FDMap(object):
+    def __init__(self):
+        self.map = {}
+        self.rev_map = {}
+        self.sel = selectors.DefaultSelector()
+
+    def add(self, fd, type_):
+        id_ = uuid.uuid4().hex
+        self.map[id_] = {
+            'fd': fd,
+            'id': id_,
+            'state': selectors.EVENT_READ,
+            'type': type_,
+            'requests': {},
+            'input': b'',
+            'closed': False,
+            'output': [],
+            'pending_output': None
+        }
+        self.sel.register(fd, selectors.EVENT_READ, data={'id': id_})
+        return id_
+
+    def add_pipe(self, fd1, fd2, type_):
+        self.map[fd2] = self.add(fd1, type_)
+        return self.map[fd2]
+
+    def get(self, fd_id):
+        assert fd_id in self.map
+        return self.map[fd_id]
+
+    def unset_state(self, fd_id, mask):
+        data = self.map[fd_id]
+        data['state'] = data['state'] & ~mask
+        if not data['state']:
+            self.sel.unregister(data['fd'])
+        else:
+            self.sel.modify(data['fd'], data['state'], data={'id': data['id']})
+
+        if mask & selectors.EVENT_WRITE:
+            assert data['pending_output'] is None
+            data['pending_output'] = data['output']
+            data['output'] = []
+
+    def update_state(self, request, response, mask):
+        assert mask | selectors.EVENT_READ
+        if request['type'] == 'request':
+            data = self.map[request['fd_id']]
+            if request['id'] not in data['requests']:
+                for k in ['model_ctr', 'total_models', 'test_ctr', 'total_tests']:
+                    request[k] = 0 if k not in request else request[k]
+                data['requests'][request['id']] = request
+            else:
+                request = data['requests'][request['id']]
+
+            if 'output' not in response:
+                response['output'] = []
+            elif not isinstance(response, list):
+                response['output'] = [response['output']]
+
+            for k in response:
+                if k == 'output':
+                    continue
+                request[k] += response[k]
+            if request['model_ctr'] == request['total_models'] and \
+                    request['test_ctr'] == self.total_tests:
+                print("WOOOOOWOO")
+                response['output'].append({'type': 'request', 'status': 'finished', 'id': request['id']})
+
+            if 'opaque' in request:
+                for out in response['output']:
+                    out['opaque'] = request['opaque']
+                data['output'].append(out)
+            del(response['output'])
+
+        else:
+            data = self.map[request['id']]
 
 
+
+        new_state = mask | data['state']
+
+        if mask & selectors.EVENT_WRITE:
+            data['output'] = data['pending_output'] + data['output']
+            if len(data['output']) == 0:
+                new_state = new_state & ~selectors.EVENT_WRITE
+            data['pending_output'] = None
+        elif len(data['output']) > 0 and data['pending_output'] is None:
+            new_state = new_state | selectors.EVENT_WRITE
+
+        if not data['state']:
+            self.sel.register(data['fd'], new_state, data={'id': data['id']})
+        else:
+            self.sel.modify(data['fd'], new_state, data={'id': data['id']})
+        data['state'] = new_state
+
+
+    def close_fd(self, fd_id):
+        data = self.map[fd_id]
+        if data['closed']: return
+        if data['state']:
+            self.sel.unregister(data['fd'])
+        # TODO: don't close this if ongoing requests?
+        data['fd'].close()
+
+    def shutdown(self):
+        for fd_id in self.map:
+            self.close_fd(fd_id)
+        self.map = {}
+        self.sel.close()
+
+
+
+
+# TODO: clear out long requests / old fd_map stuff / etc
+# does the tensorflow part group over time?
 class Server(object):
     def __init__(self, args):
-        self.sel = selectors.DefaultSelector()
+        self.fd_map = FDMap()
 
         self.model_processes = self.spawn_processes(ServerModelProcess, False, False, args.num_model_processes)
 
@@ -578,6 +701,8 @@ class Server(object):
             tp = self.test_processes[total_tests % len(self.test_processes)]
             tp['queue'].put(('load_config', test, os.path.join(args.data_path, test), args.save_path))
             total_tests += 1
+        # XXX very hackish...
+        self.fd_map.total_tests = total_tests
 
         self.socket_processes = self.spawn_processes(ServerSocketProcess, True, True, args.num_socket_processes, self.test_processes)
 
@@ -587,7 +712,7 @@ class Server(object):
         lsock.setblocking(False)
         lsock.listen()
 
-        self.sel.register(lsock, selectors.EVENT_READ, data={'type': 'incoming_connections'})
+        self.fd_map.add(lsock, 'listener')
         log_print('listening on {}:{}'.format(args.host, args.port), 1)
 
         self.loop()
@@ -596,37 +721,41 @@ class Server(object):
 # TODO: kill subprocesses?
     def loop(self):
         while True:
-            events = self.sel.select(timeout=None)
+            events = self.fd_map.sel.select(timeout=None)
             for key, mask in events:
-                data = key.data
-                if data['type'] == 'incoming_connections':
+                fd_id = key.data['id']
+                data = self.fd_map.get(fd_id)
+                if data['type'] == 'listener':
                     conn, addr = key.fileobj.accept()
-                    self.sel.register(conn, selectors.EVENT_READ, data={'type': 'client_socket', 'input':b'', 'output':b''})
                     conn.setblocking(False)
-                    log_print('accepted connection from {}'.format(addr))
+                    self.fd_map.add(conn, 'client_socket')
+                    log_print('accepted connection from {}'.format(addr, conn))
+
                 elif data['type'] in [ServerTestProcess, ServerModelProcess, 'client_socket']:
-                    self.sel.unregister(key.fileobj)
+                    # TODO: prioritize reading, since it can cancel ongoing requests?
+                    # TODO: technically, we only need to unregister from reading, not writing?
+                    self.fd_map.unset_state(fd_id, mask)
                     # send the output off to a server socket
-                    self.socket_processes[0]['queue'].put(('handle_input', key.fileobj, data, mask))
+                    self.socket_processes[0]['queue'].put(('handle_input', data, mask))
+
                 elif data['type'] == ServerSocketProcess:
                     # TODO: do we have to worry about this recv at all? slow or failing?
                     # we don't about the ServerSocketProcess's socket / socket_data that came back
-                    socket, socket_data, output = key.fileobj.recv()
-                    if output in ['register_client_socket', 'register_server_pipe']:
-                        self.sel.register(socket, selectors.EVENT_READ, data=socket_data)
-                    elif output in ['close_server_socket', 'close_server_pipe']:
-                        socket.close()
+                    fd_data, type_, *args = key.fileobj.recv()
+                    if type_ == 'done':
+                        self.fd_map.update_state(fd_data, *args)
+                    elif type_ == 'close':
+                        self.fd_map.close(fd_data['id'])
+                    else:
+                        print(type_)
+                        assert False
                 else:
                     print(data['type'])
                     assert False
 
 
     def shutdown(self):
-        # TODO: this doesn't handle sockets that are currently floating around in subprocesses
-        for socket in self.sel.get_map():
-            self.sel.unregister(socket)
-            socket.close()
-        self.sel.close()
+        self.fd_map.shutdown()
 
     def spawn_processes(self, process_type, is_thread, share_queue, num_processes, *args):
         # also, is there a ThreadPipe of some kind?
@@ -635,7 +764,8 @@ class Server(object):
         for i in range(num_processes):
             # TODO: should this pipe be closed???
             parent_pipe, child_pipe = Pipe(False)
-            self.sel.register(parent_pipe, selectors.EVENT_READ, data={'type': process_type})
+            #self.fd_map.add_pipe(parent_pipe, child_pipe, process_type)
+            self.fd_map.add(parent_pipe, process_type)
             if is_thread:
                 spawn = Thread
                 new_q = ThreadQueue #type:ignore
