@@ -550,12 +550,10 @@ class ServerSocketProcess(ServerProcess):
                         request_id = uuid.uuid4().hex
                         if request_id not in socket_data['requests']:
                             break
-                    response['output'].append({'type': 'request', 'status': 'started', 'id': request_id})
                     input_[i]['request'] = {'type': 'request', 'id': request_id, 'fd_id': socket_data['id']}
                     if 'opaque' in input_[i]:
                         input_[i]['request']['opaque'] = input_[i]['opaque']
                         # technically, we might want the server to keep track of this start message, but meh...
-                        response['output'].append(input_[i]['opaque'])
                 except:
                     # this is a race condition to insert into the socket_data while someone else could be writing
                     response['output'].append({'output': { 'error': 'Unable to parse input json'}})
@@ -573,6 +571,7 @@ class ServerSocketProcess(ServerProcess):
 
 class FDMap(object):
     def __init__(self):
+        self.server_id = uuid.uuid4().hex
         self.map = {}
         self.rev_map = {}
         self.sel = selectors.DefaultSelector()
@@ -636,17 +635,24 @@ class FDMap(object):
                 request[k] += response[k]
             if request['model_ctr'] == request['total_models'] and \
                     request['test_ctr'] == self.total_tests:
+
                 print("WOOOOOWOO")
-                response['output'].append({'type': 'request', 'status': 'finished', 'id': request['id']})
+                out = {'type': 'request', 'status': 'finished', 'server_id': self.server_id,
+                                           'total_responses': request['model_ctr'] + request['test_ctr'] + 1}
+                if 'opaque' in request:
+                    out['opaque'] = request['opaque']
+                data['output'].insert(0, out)
 
             if 'opaque' in request:
                 for out in response['output']:
                     out['opaque'] = request['opaque']
-                data['output'].append(out)
-            del(response['output'])
+                    out['server_id'] = self.server_id
 
         else:
             data = self.map[request['id']]
+
+        if 'output' in response:
+            data['output'].extend(response['output'])
 
 
 
@@ -745,7 +751,7 @@ class Server(object):
                     if type_ == 'done':
                         self.fd_map.update_state(fd_data, *args)
                     elif type_ == 'close':
-                        self.fd_map.close(fd_data['id'])
+                        self.fd_map.close_fd(fd_data['id'])
                     else:
                         print(type_)
                         assert False

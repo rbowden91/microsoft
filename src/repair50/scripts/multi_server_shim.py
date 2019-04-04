@@ -127,7 +127,6 @@ def main():
                     recv_data = ''
                     try:
                         recv_data = sock.recv(4096)  # Should be ready to read
-                        print(recv_data)
                     except Exception as e:
                         # this is fine
                         pass
