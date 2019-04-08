@@ -25,7 +25,7 @@ from ..wrangler.wrangle import finish_row, wrangle, process_ast #type:ignore
 from .c_generator import CGenerator
 
 # info, warning, error, never_print
-LOG_LEVEL = 0
+LOG_LEVEL = 5
 
 def log_print(string, log_level=0):
     if log_level >= LOG_LEVEL:
@@ -448,18 +448,10 @@ class ServerTestProcess(ServerProcess):
                         ))
                     response['total_models'] += 1
 
-        #codeProps = {}
-        #print(ast_data.prop_map)
-        #for node_num in ast_data.prop_map:
-            #node = ast_data.prop_map[node_num]
-            #codeProps[node_num]
-            #if 'props' in codeProps[node_num]:
-            #for k in ['pointers', 'replace_name', 'props']:
-            #    if k in codeProps[node_num]:
-            #        del(codeProps[node_num][k])
         response['output'] = { 'codeProps': ast_data.prop_map, 'testResults': ast_data.results }
         if self.c_generator:
-            response['output']['code'] = CGenerator(ast_data).code
+            cgen = CGenerator(ast_data)
+            response['output']['lines'] = cgen.lines
         return (response,)
 
 
@@ -636,9 +628,8 @@ class FDMap(object):
             if request['model_ctr'] == request['total_models'] and \
                     request['test_ctr'] == self.total_tests:
 
-                print("WOOOOOWOO")
-                out = {'type': 'request', 'status': 'finished', 'server_id': self.server_id,
-                                           'total_responses': request['model_ctr'] + request['test_ctr'] + 1}
+                out = {'type': 'request', 'status': 'finished', 'serverId': self.server_id,
+                                           'totalResponses': request['model_ctr'] + request['test_ctr'] + 1}
                 if 'opaque' in request:
                     out['opaque'] = request['opaque']
                 data['output'].insert(0, out)
@@ -646,7 +637,7 @@ class FDMap(object):
             if 'opaque' in request:
                 for out in response['output']:
                     out['opaque'] = request['opaque']
-                    out['server_id'] = self.server_id
+                    out['serverId'] = self.server_id
 
         else:
             data = self.map[request['id']]

@@ -37,9 +37,7 @@ default_props = lambda: {
 
 def canonicalize_snapshots(node, test):
     if node.__class__.__name__ == 'FileAST': return '<FileAST>'
-
-    if 'snapshots' not in node.node_properties['test_data'][test]:
-        return '<unk>'
+    elif test == 'null': return '<unk>'
 
     transitions = []
     for snap in node.node_properties['test_data'][test]['snapshots']:
@@ -73,6 +71,13 @@ class WrangledAST(object):
         self.results = results
         self.prop_map = {}
         self.num_nodes = 1
+
+        for test, tresults in results.items():
+            for node, changes in tresults['node_changes'].items():
+                props = get_dict(node.node_properties, 'test_data', test)
+                props['snapshots'] = changes
+                props['passed'] = tresults['passed']
+            del(tresults['node_changes'])
 
         self.visit()
 
@@ -138,6 +143,8 @@ class WrangledAST(object):
                 'attr': attr,
                 'is_root': className in transition_classes
             })
+            if 'test_data' not in nprops:
+                nprops['test_data'] = {}
             nprops['test_data']['null'] = {}
             self.num_nodes += 1
             self.prop_map[nprops['node_num']] = nprops
