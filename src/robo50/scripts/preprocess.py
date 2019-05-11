@@ -1,4 +1,4 @@
-# TODO: make output format customizable (json vs tf.record)
+# TODO: still need to make sure all input files are different...
 
 import os
 import sys
@@ -10,6 +10,7 @@ import math
 import functools
 import queue
 import shutil
+import collections
 from typing import Any, List, Dict
 from mypy_extensions import TypedDict
 from multiprocessing import Process, Queue, current_process
@@ -113,7 +114,9 @@ def process_queue(file_queue, results_queue, config_queue, unit_tests):
             break
         datasets, lexicon, root_lex, conf = item
 
-        lex = generate_lexicon(lexicon, root_lex=root_lex)
+        lex = root_lex
+        #lex = generate_lexicon(lexicon, root_lex=root_lex)
+
         for k in lex['token_to_index']:
             conf[k + '_size'] = len(lex['token_to_index'][k])
         conf['lexicon'] = lex
@@ -132,7 +135,8 @@ def process_queue(file_queue, results_queue, config_queue, unit_tests):
                 for k in data:
                     row[k] = data[k][i]
 
-                finished_row = finish_row(row, lex['token_to_index'])
+                #finished_row = finish_row(row, lex['token_to_index'])
+                finished_row = finish_row(row, root_lex['token_to_index'])
                 features = {
                     feature: tf.train.Feature(int64_list=tf.train.Int64List(value=finished_row[feature])) for feature in finished_row
                 }
@@ -198,14 +202,20 @@ def main():
     # get the total lexicon
     root_lexicon = {}
 
+    duplicate_files = set()
     num_results = 0
     while num_results < args.num_files:
         item = results_queue.get()
         num_results += 1
         if not item:
             continue
-
         a,l,t = item
+        check = tuple(a['null']['<FileAST>']['false']['forward-label'][0] + a['null']['<FileAST>']['false']['forward-attr'][0])
+        if check in duplicate_files:
+            print('duplicate file')
+            continue
+        duplicate_files.add(check)
+
         # transitions_groups
         for t1 in t:
             for t2 in t[t1]:
@@ -247,7 +257,12 @@ def main():
                     continue
 
                 rows = all_rows[test][root_transitions][transitions]
+
                 num_rows = len(rows['forward-label'])
+                average_row_length = 0
+                for row in rows['forward-label']:
+                    average_row_length += len(row)
+                average_row_length /= num_rows
                 dataset_sizes = {}
                 dataset_sizes['train'] = math.floor(num_rows * args.train_fraction)
                 dataset_sizes['valid'] = math.floor(num_rows * args.valid_fraction)
@@ -259,23 +274,32 @@ def main():
                 datasets = {}
                 for dataset in dataset_sizes:
                     datasets[dataset] = {}
+                    row_hashes = collections.defaultdict(int)
                     for k in rows:
-                        datasets[dataset][k] = rows[k][:dataset_sizes[dataset]]
+                        dataset_rows = rows[k][:dataset_sizes[dataset]]
                         rows[k] = rows[k][dataset_sizes[dataset]:]
+
+                        #for row in dataset_rows:
+                        #    row_hashes[tuple(row)] += 1
+                        #counted_rows = []
+                        #for row, count in row_hashes.items():
+                        #    counted_rows.append((count, list(row)))
+
+                        #datasets[dataset][k] = counted_rows
+                        datasets[dataset][k] = dataset_rows
 
                 root_transitions_idx = str(root_lex['transitions'][root_transitions])
 
                 conf = {}
                 conf['root_path'] = os.path.join(args.store_path, test)
+                conf['average_row_length'] = average_row_length
                 conf['dataset_sizes'] = dataset_sizes
                 conf['test'] = test
                 conf['root_transitions'] = root_transitions
                 conf['root_transitions_idx'] = root_transitions_idx
                 conf['transitions'] = transitions
-                if transitions == 'true':
-                    conf['transitions_groups'] = transitions_groups[test]
                 print('Finished config for {} {} {}'.format(test, root_transitions_idx, transitions))
-                config_queue.put((datasets, lexicon[test][root_transitions][transitions], root_lex, conf))
+                config_queue.put((datasets, lexicon[test][root_transitions][transitions], root_lexicon[test], conf))
 
         test_conf = {
             'root_lex': root_lex,

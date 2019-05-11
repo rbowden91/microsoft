@@ -12,11 +12,11 @@ from setuptools import setup
 
 from setuptools import setup, find_packages
 
-setup(name='repair50',
+setup(name='robo50',
     python_requires='>=3.6',
     version='0.2',
-    description='Repair50',
-    url='http://github.com/rbowden91/repair50',
+    description='Robo50',
+    url='http://github.com/rbowden91/robo50',
     author='Rob Bowden',
     author_email='rbowden91@gmail.com',
     license='GPLv3',
@@ -30,10 +30,10 @@ setup(name='repair50',
     ],
     entry_points={
         'console_scripts': [
-            'repair50_shim = repair50.scripts.server_shim:main',
-            'repair50_preprocess = repair50.scripts.preprocess:main',
-            'repair50_train = repair50.scripts.train:main',
-            'repair50_multi_shim = repair50.scripts.multi_server_shim:main'
+            'robo50_shim = robo50.scripts.server_shim:main',
+            'robo50_preprocess = robo50.scripts.preprocess:main',
+            'robo50_train = robo50.scripts.train:main',
+            'robo50_multi_shim = robo50.scripts.multi_server_shim:main'
         ]
     },
     zip_safe=False)

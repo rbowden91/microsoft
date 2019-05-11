@@ -16,14 +16,15 @@ import time
 import json
 import math
 
-# suppress tensorflow messages, finally
-import logging
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
 
 from multiprocessing import Process, Queue
 import queue
 
 import numpy as np
+# suppress tensorflow messages, finally
+import logging
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 import tensorflow as tf
 from ..model.model import TRNNModel, TRNNJointModel
 
@@ -75,53 +76,63 @@ class Trainer(object):
 
         self.graph = tf.Graph()
         with self.graph.as_default():
-            initializer = tf.random_uniform_initializer(-config['train_config']['init_scale'],
-                                                        config['train_config']['init_scale'])
-            self.models = {'dependency_configs': {}, 'joint_configs': {}}
-            with tf.variable_scope("TRNNModel/{}/{}/{}".format(self.transitions, 'test' if True else self.test, self.root_idx), reuse=None, initializer=initializer):
-                rows = None
-                for i in config['train_config']['dependency_configs']:
-                    self.models['dependency_configs'][i] = TRNNModel(
-                        i, config, self.transitions == 'true', self.test == 'null', rows=rows
-                    )
-                    if rows is None:
-                        rows = self.models['dependency_configs'][i].rows
-                        self.iter_model = self.models['dependency_configs'][i]
-                for i in config['train_config']['joint_configs']:
-                    self.models['joint_configs'][i] = TRNNJointModel(
-                        self.models['dependency_configs'],
-                        i, config, self.transitions == 'true', self.test == 'null', rows=rows
-                    )
-
-
-            # save stuff to be used later in inference
-            self.saver = tf.train.Saver()
-
             sess_config = tf.ConfigProto(device_count = {'GPU': (0 if args.cpu else 1)})
             self.session = tf.Session(config=sess_config)
 
-            ckpt = tf.train.get_checkpoint_state(config['checkpoint_dir'])
-            if ckpt:
-                if not ckpt.model_checkpoint_path:
-                    print('invalid checkpoint?')
-                    sys.exit(1)
-                elif args.checkpoint:
-                    self.saver.restore(self.session, ckpt.model_checkpoint_path)
-                    print('restoring?')
-                elif not args.force:
-                    print('It looks like data is already here. Run the command again with either -f or --checkpoint.')
-                    sys.exit(1)
+            self.models = {'dependency_configs': {}, 'joint_configs': {}}
+            with tf.variable_scope("TRNNModel", reuse=None):
+                rows = None
+
+                for i in config['train_config']['dependency_configs']:
+                    self.models['dependency_configs'][i] = TRNNModel(
+                        i, config, self.transitions == 'true', self.test == 'null', rows=rows)
+
+                    if rows is None:
+                        rows = self.models['dependency_configs'][i].rows
+                        self.iter_model = self.models['dependency_configs'][i]
+
+                #for i in config['train_config']['joint_configs']:
+                #    self.models['joint_configs'][i] = TRNNJointModel(
+                #        self.models['dependency_configs'],
+                #        i, config, self.transitions == 'true', self.test == 'null', rows=rows)
+
+                self.session.run(tf.global_variables_initializer())
+                self.model_variables = tf.all_variables()
+                saver = tf.train.Saver(self.model_variables)
+                saver.save(self.session, os.path.join(config['best_dir'], 'trimmed-model'))#, global_step)
+
+
+                for i in config['train_config']['dependency_configs']:
+                    self.models['dependency_configs'][i].addTraining()
+
+                #for i in config['train_config']['joint_configs']:
+                #    self.models['joint_configs'][i].addTraining()
+
+                self.saver = tf.train.Saver()
+
+                # save stuff to be used later in inference
+
+                ckpt = tf.train.get_checkpoint_state(config['checkpoint_dir'])
+                if ckpt:
+                    if not ckpt.model_checkpoint_path:
+                        print('invalid checkpoint?')
+                        sys.exit(1)
+                    elif args.checkpoint:
+                        self.saver.restore(self.session, ckpt.model_checkpoint_path)
+                        print('restoring?')
+                    elif not args.force:
+                        print('It looks like data is already here. Run the command again with either -f or --checkpoint.')
+                        sys.exit(1)
+                    else:
+                        self.session.run(tf.global_variables_initializer())
                 else:
                     self.session.run(tf.global_variables_initializer())
-            else:
-                self.session.run(tf.global_variables_initializer())
-
 
             # need to get global step from models...
             #global_step = session.run(tf.train.get_or_create_global_step())
             #self.epoch = np.asscalar(global_step // self.num_files['train'])
             #self.epoch_step = (global_step - self.epoch * self.num_files['train']) // config['batch_size']
-            self.writer = tf.summary.FileWriter(config['log_dir'], graph=tf.get_default_graph()) #\ if self.train_config['summarywriter']
+            self.writer = tf.summary.FileWriter(config['log_dir'], graph=self.graph) #\ if self.train_config['summarywriter']
             self.epoch = 0
 
     def run_epoch(self):
@@ -133,7 +144,7 @@ class Trainer(object):
             config['train_perplexities'].append(train_perplexity)
             config['valid_perplexities'].append(valid_perplexity)
             if config['best_validation'] is None or valid_perplexity < config['best_validation']:
-                self.saver.save(self.session, os.path.join(config['best_dir'], 'model'))#, global_step)
+                self.saver.save(self.session, os.path.join(config['best_dir'], 'model'), write_meta_graph=False)#, global_step)
                 config['best_validation'] = valid_perplexity
                 config['best_validation_epoch'] = self.epoch
                 with open(config['model_config_file'], 'w') as f:
@@ -195,8 +206,10 @@ class Trainer(object):
                             }
             with open(config['model_config_file'], 'w') as f:
                 json.dump(config, f)
-
+            saver = tf.train.Saver(self.model_variables)
+            saver.save(self.session, os.path.join(self.config['best_dir'], 'trimmed-model'), write_meta_graph=False)#, global_step)
             self.session.close()
+
 
 
     #def run_profiler(self):
@@ -222,7 +235,9 @@ class Trainer(object):
         train_ops = []
         fetch_ops = []
         fetches = {}
+        sizes = {}
         for d in models:
+            sizes[d] = models[d].hidden_size
             fetches[d] = models[d].fetches['loss']
             if mode == 'train':
                 train_ops.append(models[d].ops['train'])
@@ -253,8 +268,8 @@ class Trainer(object):
                     loss = np.asscalar(vals[d][k])
                     total_loss[d][k] += loss;
                     if verbose:
-                        print("\t%s %s %s %s %s loss: %.3f\tperplexity: %.3f\taverage perplexity: %.3f" %
-                            (self.test, self.root_idx, self.transitions, d, k, loss, np.exp(loss), np.exp(total_loss[d][k] / (epoch_step + 1))))
+                        print("\t%s %s %s %s %s (hidden-size: %d) loss: %.3f\tperplexity: %.3f\taverage perplexity: %.3f" %
+                            (self.test, self.root_idx, self.transitions, d, k, sizes[d], loss, np.exp(loss), np.exp(total_loss[d][k] / (epoch_step + 1))))
             epoch_step += 1
         return total_loss
 
@@ -275,7 +290,7 @@ class Trainer(object):
         self.run_models(True, mode, verbose)
 
         # for now, save after very epoch
-        self.saver.save(self.session, os.path.join(self.config['checkpoint_dir'], 'model'))#, global_step)
+        self.saver.save(self.session, os.path.join(self.config['checkpoint_dir'], 'model'), write_meta_graph=False)#, global_step)
 
         # TODO: how do perplexities add?
         for d in total_loss:

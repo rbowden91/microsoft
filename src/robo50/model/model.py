@@ -1,7 +1,10 @@
+import logging
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
 import tensorflow as tf # type:ignore
 import einops as e # type:ignore
-from .tensorarray import RNNTensorArray, RNNTensorArrayCell, define_scope
 
+from .tensorarray import RNNTensorArray, RNNTensorArrayCell, define_scope
 from .config import dependency_configs, joint_configs
 
 def data_type():
@@ -58,14 +61,12 @@ class TRNNBaseModel(object):
                 new_rows[key] = {}
             self.reconstruct_example(rows, new_rows[key], keys)
 
-
     @define_scope
-    def calculate_loss_and_tvars(self, labels, logits):
+    def calculate_loss_and_probabilities(self, labels, logits):
         loss = {}
         probabilities = {}
         # mask is the same regardless of direction
         mask = tf.cast(self.rows['forward']['mask'], tf.float32)
-        total_loss = 0.0
         for k in labels:
             mask2 = mask
             if k == 'pointers':
@@ -78,12 +79,9 @@ class TRNNBaseModel(object):
                                 else (tf.nn.sparse_softmax_cross_entropy_with_logits, tf.nn.softmax)
             num_tokens = tf.reduce_sum(mask2)
             loss[k] = tf.reduce_sum(cross(labels=labels[k], logits=logits[k]) * mask2) / num_tokens
-            total_loss += loss[k]
             probabilities[k] = predict(logits[k])
         # TODO: a tvar can appear multiple times. But we want to clip norms for losses separately???
-        tvars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.super_scope + self.scope)
-        grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), self.max_grad_norm)
-        return loss, probabilities, zip(grads, tvars)
+        return loss, probabilities
 
     @define_scope
     def init_iterator(self):
@@ -129,18 +127,35 @@ class TRNNBaseModel(object):
 
         return iterator.get_next(), iter_ops, placeholders
 
+    def addTraining(self):
+        total_loss = 0.0
+        for k in self.fetches['loss']:
+            total_loss += self.fetches['loss'][k]
+        tvars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.super_scope + self.scope)
+        grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), self.max_grad_norm)
+        optimizer = tf.train.AdamOptimizer(1e-2)
+        self.ops['train'] = optimizer.apply_gradients(zip(grads, tvars), global_step=self.global_step)
 
     def __init__(self, is_joint, dconfig, config, transitions, handle_pointers, rows=None):
         self.is_joint = is_joint
         self.dconfig = dconfig
         self.transitions = transitions
         self.handle_pointers = handle_pointers
-        for k in ['label_size', 'attr_size', 'transitions_size', 'hidden_size', 'features', 'num_layers', 'max_grad_norm']:
+        for k in ['label_size', 'attr_size', 'transitions_size', 'features', 'num_layers', 'max_grad_norm']:
             if k in config:
                 setattr(self, k, config[k])
             elif k in config['train_config']:
                 setattr(self, k, config['train_config'][k])
         self.mem_size = 20
+
+        #if config['average_row_length'] <= 5:
+        #    self.hidden_size = 4
+        #elif config['average_row_length'] <= 25:
+        #    self.hidden_size = 8
+        #elif config['average_row_length'] <= 50:
+        #    self.hidden_size = 16
+        #else:
+        self.hidden_size = 32
 
         # grab the current scope, in case the model was instantiated within a scope
         # only update the subset of weights relevant to these losses
@@ -160,8 +175,9 @@ class TRNNBaseModel(object):
         self.ops = {}
 
 
-
-        with tf.variable_scope(self.scope):
+        initializer = tf.random_uniform_initializer(-config['train_config']['init_scale'],
+                                                    config['train_config']['init_scale'])
+        with tf.variable_scope(self.scope, reuse=None, initializer=initializer):
             # so that we can share an iterator between different models, rather than iterate over the same data
             # multiple times
             if rows is None:
@@ -192,17 +208,13 @@ class TRNNBaseModel(object):
 
             labels, logits = self.collect_logits()
 
-            optimizer = tf.train.AdamOptimizer(1e-2)
-            self.fetches['loss'], self.fetches['probabilities'], train_vars = self.calculate_loss_and_tvars(labels, logits)
-            self.ops['train'] = optimizer.apply_gradients(train_vars, global_step=self.global_step)
 
             self.fetches['cells'] = {}
             for d in self.cells.fetches:
                 self.fetches['cells'][d] = {}
                 for k in self.cells.fetches[d]:
                     self.fetches['cells'][d][k] = self.cells.fetches[d][k]()
-            self.cells.fetches
-            self.initials = self.cells.initials
+            self.fetches['loss'], self.fetches['probabilities'] = self.calculate_loss_and_probabilities(labels, logits)
 
 
 

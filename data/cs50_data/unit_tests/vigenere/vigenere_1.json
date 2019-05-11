@@ -63,6 +63,28 @@
 	}
     },
     {
+    	"b,c,d": {
+	    "argv": "./vigenere b",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "c"},
+		{"type": "stdout", "value": "d\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+    	"B,C,D": {
+	    "argv": "./vigenere B",
+	    "check50": true,
+	    "description": "",
+	    "run": [
+		{"type": "stdin", "value": "C"},
+		{"type": "stdout", "value": "D\\\\n"},
+		{"type": "return", "value": 0}
+	    ]
+	}
+    },
+    {
 	"baz,barfoo,caqgon": {
 	    "argv": "./vigenere baz",
 	    "check50": true,

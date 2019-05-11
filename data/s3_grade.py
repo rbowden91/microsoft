@@ -5,7 +5,7 @@ from shutil import move
 
 from pycparser import c_parser, c_ast, parse_file
 from centipyde.interpreter import run_tests, InterpTooLong
-from repair50.preprocessor.external import ExternalCPP
+from robo50.preprocessor.external import ExternalCPP
 
 prefix = 'cs50_data'
 
