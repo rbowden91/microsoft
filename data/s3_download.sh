@@ -4,7 +4,9 @@ download () {
     local num="$1"
     mkdir -p $num
     cd $num
-    s3cmd get --recursive --force s3://sandbox50x/uploads/$num
+    #https://github.com/andrewrk/node-s3-cli
+    #sudo npm install -g s3-cli
+    s3-cli ls s3://sandbox50x/uploads/ .
 }
 
 mkdir -p cs50_data/s3_unsorted_downloads
