@@ -45,6 +45,7 @@ class IDRenamer(ModifyingVisitor):
             return n
         # XXX don't want to rename something like "struct tmp tmp" to "struct STRUCT_ID1 STRUCT_ID1"
         # XXX handle struct members? need to rename them
+        # TODO: if it is visiting_decl and in decl_sets, syntax error??
         elif n in self.local_maps[-1]:
             name = self.local_maps[-1][n]
             # a declaration with the same name shouldn't count as reusing the old variable
@@ -94,6 +95,7 @@ class IDRenamer(ModifyingVisitor):
                     break
             else: assert False
         else:
+            # TODO: does adding a number ever make sense?
             for i in range(len(self.reverse_id_map) + 1):
                 if name + str(i) not in self.reverse_id_map:
                     #name += str(i)
@@ -102,7 +104,7 @@ class IDRenamer(ModifyingVisitor):
 
         node.node_properties['replace_name'] = name
         if context == 'local' or context == 'arg':
-            self.local_maps[-1][n] = name# + '___' + n
+            self.local_maps[-1][n] = name
             self.reverse_local_maps[-1][n] = set(node)
             node.node_properties['pointers'] = self.reverse_local_maps[-1][n]
         else:

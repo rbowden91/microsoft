@@ -45,6 +45,9 @@ def canonicalize_snapshots(node, test):
         for func_scope in snap['scope']:
             for scope in func_scope:
                 for key in scope:
+                    if 'after' not in scope[key]:
+                        # the variable was only read, not written
+                        continue
                     locals_.append(str(scope[key]['before']) + '->' + str(scope[key]['after']))
         memory = []
         for array in snap['memory']:
@@ -69,6 +72,7 @@ class WrangledAST(object):
     def __init__(self, ast, results):
         self.ast = ast
         self.results = results
+        self.node_map = {}
         self.prop_map = {}
         self.num_nodes = 1
 
@@ -147,6 +151,7 @@ class WrangledAST(object):
                 nprops['test_data'] = {}
             nprops['test_data']['null'] = {}
             self.num_nodes += 1
+            self.node_map[nprops['node_num']] = node
             self.prop_map[nprops['node_num']] = nprops
 
         # we don't want the subtree from every node.

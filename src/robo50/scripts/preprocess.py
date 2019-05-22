@@ -38,6 +38,7 @@ parser.add_argument('--valid_fraction', help='fraction of files for validating',
 parser.add_argument('--force', help='delete any preexisting data', action='store_true')
 parser.add_argument('--unit_tests', help='unit tests for these files', default=None)
 parser.add_argument('--unk_cutoff', help='fraction of files that need to have a token or else it\'s considered unknown', type=float, default=.01)
+# TODO: print statistics
 
 def generate_lexicon(lex, root_lex=None, cutoff=None):
     revlex = {}
@@ -247,6 +248,20 @@ def main():
     for test in lexicon:
         root_lexicon[test] = generate_lexicon(root_lexicon[test], cutoff=args.num_files * args.unk_cutoff)
 
+    # translate transitions to their indices
+    for t1 in transitions_groups:
+        for t2 in list(transitions_groups[t1].keys()):
+            for t3 in transitions_groups[t1][t2]:
+                for t4 in list(transitions_groups[t1][t2][t3].keys()):
+                    if t4 in root_lexicon[t3]['token_to_index']['transitions']:
+                        root_trans_idx = root_lexicon[t3]['token_to_index']['transitions'][t4]
+                        transitions_groups[t1][t2][t3][root_trans_idx] = transitions_groups[t1][t2][t3][t4]
+                    del(transitions_groups[t1][t2][t3][t4])
+            if t2 in root_lexicon[t1]['token_to_index']['transitions']:
+                root_trans_idx = root_lexicon[t1]['token_to_index']['transitions'][t2]
+                transitions_groups[t1][root_trans_idx] = transitions_groups[t1][t2]
+            del(transitions_groups[t1][t2])
+
     print('Drafting configs')
     for test in all_rows:
         root_lex = root_lexicon[test]['token_to_index']
@@ -303,7 +318,9 @@ def main():
 
         test_conf = {
             'root_lex': root_lex,
-            'unit_test': args.unit_tests[test] if test != 'null' else None
+            'unit_test': args.unit_tests[test] if test != 'null' else None,
+            # TODO: use indices instead of raw transitions?
+            'transitions_groups': transitions_groups[test] if test != 'null' else None
         }
         test_config_path = os.path.join(args.store_path, test)
         os.makedirs(test_config_path, exist_ok=True)

@@ -6,6 +6,8 @@ import uuid
 import socket
 import selectors
 import time
+import re
+import traceback
 
 from collections import namedtuple
 from queue import Queue as ThreadQueue
@@ -17,10 +19,20 @@ import numpy as np # type:ignore
 import tensorflow as tf #type:ignore
 import collections
 
+from centipyde.interpreter import run_tests
+
 from ..default_dict import get_dict
 from ..model.config import joint_configs, dependency_configs, valid_dependencies #type:ignore
 from ..wrangler.wrangle import finish_row, wrangle, process_ast #type:ignore
+from ..wrangler.normalizers.BreakPoint import BreakPoint
 from .c_generator import CGenerator
+
+# info, warning, error, never_print
+LOG_LEVEL = 0
+
+def log_print(string, log_level=0):
+    if log_level >= LOG_LEVEL:
+        print(string)
 
 class FDMap(object):
     def __init__(self):
@@ -78,36 +90,14 @@ class FDMap(object):
             data = self.map[request['id']]
         if data['closed']: return
 
-        request_out = False
         if request['type'] == 'request':
-            ctrs = ['model_ctr', 'total_models', 'test_ctr', 'total_tests'] if data['type'] == 'client_socket' else []
             if request['id'] not in data['requests']:
-                for k in ctrs:
-                    request[k] = 0 if k not in request else request[k]
                 data['requests'][request['id']] = request
             else:
                 request = data['requests'][request['id']]
 
             if not isinstance(response, list):
                 response['output'] = [response['output']]
-
-            for k in response:
-                if k == 'output' or k == 'direction':
-                    continue
-                request[k] += response[k]
-
-            if data['type'] == 'client_socket':
-                if request['model_ctr'] == request['total_models'] and \
-                        request['test_ctr'] == self.total_tests:
-
-                    request_out = {'type': 'request', 'status': 'finished',
-                                   'totalResponses': request['model_ctr'] + request['test_ctr'] + 1}
-                    reqwuest_out['serverId'] = response
-            else:
-                assert data['type'] == 'server_socket'
-                #if request['server_ctr'] == request['total_servers']:
-                #    request_out = {'type': 'request', 'status': 'finished',
-                #                            'totalServers': request['total_servers']}
 
         if data['type'] == 'client_socket' and 'direction' in response and response['direction'] == 'to_servers':
             datas = [self.map[s] for s in self.server_sockets]
@@ -117,11 +107,6 @@ class FDMap(object):
 
         for data in datas:
             if data['closed']: continue
-
-            if request_out:
-                if 'opaque' in request:
-                    request_out['opaque'] = request['opaque']
-                data['output'].insert(0, request_out)
 
             if 'opaque' in request:
                 for out in response['output']:
@@ -163,115 +148,87 @@ class FDMap(object):
         self.sel.close()
 
 # base class
+# TODO: if the client crashes, this currently crashes??
 
 class ServerProcess(object):
-    def __init__(self, input_queue, origin_pipe) -> None:
+    def __init__(self, input_queue) -> None:
         self.input_queue = input_queue
-        self.origin_pipe = origin_pipe
         self.loop()
 
     def loop(self):
         while True:
             handler, *args = self.input_queue.get()
-            if handler == 'load_config':
-                self.load_config(*args)
-            elif handler == 'handle_input':
-                output = self.handle_input(*args)
-                if output is not False:
-                    request_data, *args = args
-                    self.origin_pipe.send((request_data, *output))
-            elif handler == 'server_connect':
-                output = self.server_connect(*args)
-                self.origin_pipe.send(output)
-            else:
-                assert False
+            try:
+                getattr(self, handler)(*args)
+            except:
+                traceback.print_exc()
 
+
+# TODO: each of these processes can also be multithreaded (instead?)
 class ServerModelProcess(ServerProcess):
-    def __init__(self, *args, **kwargs) -> None:
-        self.test_config = {} #type:ignore
+    def __init__(self, model_configs, num_subprocesses, beam_queues, *args, **kwargs) -> None:
+        self.model_configs = model_configs #type:ignore
         self.sessions = [] #type: ignore
+        self.beam_queues = beam_queues
 
-    def load_config(self, model_path, save_path):
-        with open(os.path.join(model_path, 'config.json'), 'r') as f:
-            test_conf = json.load(f)
-        d = get_dict(self.test_config, test_conf['test'], test_conf['root_transitions_idx'])
-        d[test_conf['transitions']] = test_conf
-        with open(os.path.join(model_path, save_path, 'config.json'), 'r') as f:
-            test_conf.update(json.load(f))
+        for i in range(num_subprocesses-1):
+            try:
+                pid = os.fork()
+            except OSError:
+                print("Failed to fork model process")
+                break
+            if pid == 0:
+                break
+        super().__init__(*args, **kwargs)
 
-        # fix windows line endings
-        test_conf['best_dir'] = test_conf['best_dir'].replace('\\', '/')
-        log_print('Loaded model {} {} {}'.format(test_conf['test'], test_conf['root_idx'], test_conf['transitions'], 1)
-
-    def get_session(self, test_conf):
-        if 'session' not in test_conf:
-            for (session, saver) in self.sessions:
+    def get_session(self, model_conf):
+        if 'session' not in model_conf:
+            for session in self.sessions:
                 try:
-                    saver.restore(session, os.path.join(test_conf['best_dir'], 'trimmed-model'))
+                    session['saver'].restore(session['session'], os.path.join(model_conf['best_dir'], 'trimmed-model'))
                 except:
                     continue
+                session['loaded_conf'] = model_conf
+                model_conf['session'] = session
                 break
             else:
                 with tf.Graph().as_default():
-                    saver = tf.train.import_meta_graph(os.path.join(test_conf['best_dir'], "trimmed-model.meta"))
+                    saver = tf.train.import_meta_graph(os.path.join(model_conf['best_dir'], "trimmed-model.meta"))
                     session = tf.Session(config=tf.ConfigProto(device_count = {'GPU': 0}))
-                self.sessions.append((session, saver))
-                test_conf['saver'] = saver
-                test_conf['session'] = session
-                return session
-        else:
-            # TODO: this might happen even if it has already been loaded
-            test_conf['saver'].restore(session, os.path.join(test_conf['best_dir'], 'trimmed-model'))
-            return test_conf['session']
-        super().__init__(*args, **kwargs)
+                self.sessions.append({'session': session, 'saver': saver, 'loaded_conf': None})
+                model_conf['session'] = self.sessions[-1]
+        if model_conf['session']['loaded_conf'] != model_conf:
+            model_conf['session']['saver'].restore(model_conf['session']['session'], os.path.join(model_conf['best_dir'], 'trimmed-model'))
+            model_conf['session']['loaded_conf'] = model_conf
+        return model_conf['session']['session']
 
-    def handle_input(self, request, rows, test,
-                     root_node_idx, root_trans_idx, transitions):
-        response = {'model_ctr': 1}
-        test_conf = self.test_config[test][root_trans_idx][transitions]
+    def handle_input(self, beam_num, root_node_idx, rows, test, root_trans_idx, transitions):
+        model_conf = self.model_configs[test][root_trans_idx][transitions]
 
         log_print('Running model {} {} {}'.format(test, root_trans_idx, transitions), 0)
-        lexicon = test_conf['lexicon']
+        lexicon = model_conf['lexicon']
         node_nums = rows['forward-node_num']
         row = finish_row(rows, lexicon['token_to_index'])
         data_dict = {}
-        for k in test_conf['features']:
-            data_dict[test_conf['features'][k]] = [row[k]]
+        for k in model_conf['features']:
+            data_dict[model_conf['features'][k]] = [row[k]]
 
-        session = self.get_session(test_conf)
-        session.run(test_conf['tensor_iter'], data_dict)
-        vals = session.run(test_conf['fetches'])
+        session = self.get_session(model_conf)
+        session.run(model_conf['tensor_iter'], data_dict)
+        vals = session.run(model_conf['fetches'])
+
+        # TODO: send this back to beam process
 
         codeProps = {}
-        dependencyConfigs = {cdependency: True for cdependency in vals['dependency_configs']}
         for i in range(1, len(row['forward-self'])):
             idx = {'forward': row['forward-self'][i], 'reverse': row['reverse-self'][i]}
-            props = self.gather_props(self.test_config[test][root_trans_idx][transitions], vals, data_dict, idx)
-            codeProps[node_nums[i-1]] = {'test_data': { test: { 'model_results': { root_node_idx: { transitions: props } } } } };
-        response['output'] = { 'codeProps': codeProps, 'dependencyConfigOptions': dependencyConfigs }
-        return (response,)
-
-    #for test in self.test_conf:
-    #    for root_idx in rows[test]:
-    #        if test == 'null' or len(rows[test][root_idx][True]) == 0: continue
-
-    #        root_node = data.prop_map[root_idx]['props']
-    #        root_props = root_node[test][root_idx][True]
-    #        if not root_props['unknown_transitions']: continue
-    #        root_props['suggested_trans_groups'] = collections.defaultdict(int)
-    #        for test2 in data.nodes:
-    #            if test2 == 'null' or test == test2: continue
-    #            root_props2 = root_node[test2][root_idx][True]
-    #            if not root_props2 or 'root_trans_idx' not in root_props2: continue
-    #            tg = self.test_conf[test2][root_props2['root_trans_idx']][True]
-    #            #if not tg: continue
-    #            tg = tg['transitions_groups'][test]
-    #            for correct_transitions in tg:
-    #                root_props['suggested_trans_groups'][correct_transitions] += tg[correct_transitions]
+            props = self.gather_props(self.model_configs[test][root_trans_idx][transitions], vals, data_dict, idx)
+            codeProps[node_nums[i-1]] = props
+        self.beam_queues[beam_num].put((test, root_node_idx, root_trans_idx, transitions, codeProps))
 
 
-    def gather_props(self, test_config, vals, data_dict, diridx):
-        tc = test_config
+    def gather_props(self, model_config, vals, data_dict, diridx):
+        tc = model_config
         revlex = tc['lexicon']['index_to_token']
         lex = tc['lexicon']['token_to_index']
         transitions = tc['transitions'] == 'true'
@@ -361,47 +318,37 @@ class ServerModelProcess(ServerProcess):
 
         return prop
 
-class ServerTestProcess(ServerProcess):
-    def __init__(self, model_processes, c_generator, *args, **kwargs):
-        self.test_config = {}
+class ServerBeamProcess(ServerProcess):
+    def __init__(self, test_configs, model_configs, server_queue, personal_beam_queues, model_queue, *args, **kwargs):
+        self.server_queue = server_queue
+        self.model_queue = model_queue
+
+        self.personal_beam_queues = personal_beam_queues
+
+        self.test_configs = test_configs
+        self.model_configs = model_configs
         self.unit_tests = {}
-        self.model_processes = model_processes
-        self.model_process_map = {}
-        self.c_generator = c_generator
+
+        for test in test_configs:
+            if test != 'null':
+                self.unit_tests[test] = self.test_configs[test]['unit_test']
+
+        self.beam_num = len(personal_beam_queues) - 1
+        for i in range(self.beam_num):
+            try:
+                pid = os.fork()
+            except OSError:
+                print("Failed to fork model process")
+                break
+            if pid == 0:
+                self.beam_num = i
+                break
+
         super().__init__(*args, **kwargs)
 
-    def load_config(self, test, path, save_path):
-        with open(os.path.join(path, 'config.json'), 'r') as f:
-            self.test_config[test] = json.load(f)
-        if test != 'null':
-            self.unit_tests[test] = self.test_config[test]['unit_test']
-
-        total_models = 0
-        for root_idx in os.listdir(path):
-            if root_idx == 'config.json': continue
-            for transitions in os.listdir(os.path.join(path, root_idx)):
-                model_path = os.path.join(path, root_idx, transitions)
-                p = self.model_processes[total_models % len(self.model_processes)]
-                total_models += 1
-                p['queue'].put(('load_config', model_path, save_path))
-                get_dict(self.model_process_map, test, root_idx)[transitions] = p
-
-        log_print('Test {} initialized'.format(test), 1)
-
-    def handle_input(self, request, code):
-        response = {'total_models': 0, 'test_ctr': 1}
-        try:
-            ast_data = wrangle(code, tests=self.unit_tests, is_file=False)
-        except Exception as e:
-            response['output'] = {'error': "Couldn't parse code." + str(e)}
-            return (response, )
-
-        rows = process_ast(ast_data)
-
-        # TODO: if test results were successful, no need to run the model?
-        for test in self.model_process_map:
-            root_lex = self.test_config[test]['root_lex']['transitions']
-            mpm = self.model_process_map[test]
+    def run_models(self, rows):
+        for test in self.test_configs:
+            root_lex = self.test_configs[test]['root_lex']['transitions']
             for root_node_idx in rows[test]:
                 for transitions in rows[test][root_node_idx]:
                     root_node = ast_data.prop_map[root_node_idx]
@@ -413,32 +360,142 @@ class ServerTestProcess(ServerProcess):
                     root_trans_idx = str(root_lex[root_transitions])
                     root_test_data['unknown_transitions'] = False
                     root_test_data['root_trans_idx'] = root_trans_idx
-                    if root_trans_idx not in mpm or \
-                            transitions not in mpm[root_trans_idx]:
-                        # XXX this one isn't quite "unknown". We just didn't have enough test data???
-                        root_test_data['unknown_transitions'] = True
-                        continue
-                    mpm[root_trans_idx][transitions]['queue'].put((
+                    #if root_trans_idx not in mpm or \
+                    #        transitions not in mpm[root_trans_idx]:
+                    #    # XXX this one isn't quite "unknown". We just didn't have enough test data???
+                    #    root_test_data['unknown_transitions'] = True
+                    #    continue
+                    self.model_queue.put((
                         'handle_input',
-                        request,
+                        self.beam_num,
+                        root_node_idx,
                         rows[test][root_node_idx][transitions],
                         test,
-                        root_node_idx,
                         root_trans_idx,
                         transitions,
-                        ))
-                    response['total_models'] += 1
+                    ))
+                    enqueues += 1
 
-        response['output'] = { 'codeProps': ast_data.prop_map, 'testResults': ast_data.results }
-        if self.c_generator:
-            cgen = CGenerator(ast_data)
-            response['output']['lines'] = cgen.lines
-        return (response,)
+        while enqueues > 0:
+            test, root_node_idx, root_trans_idx, transitions, codeProps = self.personal_beam_queues[self.beam_num].get()
+            print(test, root_node_idx, transitions)
+            enqueues -= 1
+
+    def replace_node(self, ast_data, rows, node_idx):
+        parent_idx = rows['null'][1]['false']['forward-parent'][node_idx-1]
+        parent = ast_data.node_map[parent_idx]
+        node = ast_data.node_map[node_idx]
+        replacement = BreakPoint(lambda interp: self.show_env(interp),
+                    node,
+                    lambda interp: self.show_env(interp))
+        c_names = {}
+        replace_c_name = None
+        for c_name, c in parent.children():
+            m = re.match("([^\\[]*)\\[", c_name)
+
+            # is this a list-based node child (like a Compound's block_items)
+            if m:
+                name = m.groups()[0]
+                if c == node:
+                    replace_c_name = name
+                if name not in c_names:
+                    c_names[name] = []
+                c_names[name].append(c if c != node else replacement)
+            else:
+                if c == node:
+                    setattr(parent, c_name, replacement)
+                    return
+        assert replace_c_name is not None
+        setattr(parent, name, c_names[replace_c_name])
+
+
+
+    def generate_tree(self, row, test, root_trans_idx, transitions):
+        self.model_queue.put((
+            'handle_input',
+            self.beam_num,
+            row,
+            test,
+            root_trans_idx,
+            transitions
+        ))
+
+        interpreter.run(node, starting_state)
+        test, root_node_idx, root_trans_idx, transitions, codeProps = self.personal_beam_queues[self.beam_num].get()
+
+    def show_env(self, interp):
+        print(interp.scope)
+
+    def handle_input(self, request, code):
+        try:
+            ast_data = wrangle(code, tests=self.unit_tests, is_file=False)
+        except Exception as e:
+            return self.server_queue.put((request, {'output': {'error': "Couldn't parse code." + str(e)}}))
+
+        rows = process_ast(ast_data)
+        cgen = CGenerator(ast_data)
+        self.server_queue.put((request, {'output': { 'codeProps': ast_data.prop_map,
+                'testResults': ast_data.results, 'lines': cgen.lines }}))
+
+        # identify the failing test cases
+        passed_tests = []
+        failed_tests = {}
+        for test, results in ast_data.results.items():
+            if results['passed']:
+                passed_tests.append(test)
+            else:
+                unknown_transitions = failed_tests[test] = []
+                root_lex = self.test_configs[test]['root_lex']['transitions']
+                for root_node_idx in rows[test]:
+                    root_node = ast_data.prop_map[root_node_idx]
+                    root_test_data = root_node['test_data'][test]
+                    root_transitions = root_test_data['transitions']
+                    if root_transitions == '<unk>' or root_transitions not in root_lex:
+                        unknown_transitions.append(root_node_idx)
+                        #root_test_data['unknown_transitions'] = True
+        # TODO: this should be in preprocessing...
+        inv_root_lex = {}
+        for test in self.test_configs:
+            inv_root_lex[test] = {}
+            for transition, idx in self.test_configs[test]['root_lex']['transitions'].items():
+                inv_root_lex[test][idx] = transition
+
+        # TODO: order the tests
+        replacements = {}
+        for passed_test in passed_tests:
+            root_lex = self.test_configs[passed_test]['root_lex']['transitions']
+            tgroups = self.test_configs[passed_test]['transitions_groups']
+            for failed_test, unk_nodes in failed_tests.items():
+                for unk_node_idx in unk_nodes:
+                    # this node wasn't touched by the passing test
+                    unk_node = ast_data.prop_map[unk_node_idx]
+                    if passed_test not in unk_node['test_data']: continue
+                    root_transitions = unk_node['test_data'][passed_test]['transitions']
+                    # the node also has an unknown transition in the passing test case
+                    if root_transitions == '<unk>' or root_transitions not in root_lex: continue
+                    root_trans_idx = str(root_lex[root_transitions])
+                    tg = tgroups[root_trans_idx][failed_test]
+                    self.replace_node(ast_data, rows, int(unk_node['node_num']))
+                    run_tests(ast_data.ast, {failed_test: self.unit_tests[failed_test]})
+                    # TODO: sort by count
+                    # TODO: see if we can combine info across tests in any way?
+                    for potential_trans_idx in tg:
+                        if int(potential_trans_idx) not in inv_root_lex[failed_test]: continue
+                        print(inv_root_lex[failed_test][int(potential_trans_idx)])
+                        return
+                    #    self.generate_tree(rows[failed_test][unk_node_idx]['false'], failed_test,
+                    #                potential_trans_idx, 'false')
+        # TODO: can also pull from the transitions models for guesses as to the correct transitions
+
+        # TODO: see if plugging in a transitions group causes the program to finish successfully?
+
 
 
 class ServerSocketProcess(ServerProcess):
-    def __init__(self, test_processes, *args, **kwargs):
-        self.test_processes = test_processes
+    def __init__(self, beam_queue, beam_response_queue, server_queue, *args, **kwargs):
+        self.beam_queue = beam_queue
+        self.beam_response_queue = beam_response_queue
+        self.server_queue = server_queue
         super().__init__(*args, **kwargs)
 
     # SENDING RESPONSE METHODS
@@ -468,18 +525,7 @@ class ServerSocketProcess(ServerProcess):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setblocking(False)
         sock.connect_ex(server)
-        return (sock, 'server_connected')
-
-    def handle_input(self, fileobj_data, mask, messageId):
-        fileobj  = fileobj_data['fd']
-        if fileobj_data['type'] in [ServerTestProcess, ServerModelProcess]:
-            ret = self.handle_server_pipe(fileobj_data, mask)
-        else:
-            assert fileobj_data['type'] in ('client_socket', 'server_socket')
-            ret = self.handle_socket(fileobj_data, mask, messageId)
-        if ret:
-            return (*ret, mask)
-        return False
+        self.server_queue.put(('server_connected', sock))
 
     def handle_socket(self, socket_data, mask, messageId):
         response = {'output':[]}
@@ -488,7 +534,7 @@ class ServerSocketProcess(ServerProcess):
             assert len(socket_data['pending_output']) > 0
             self.send_msg(socket_data)
             # try again later, though should probably kill it at some point
-            return ('done', response)
+            self.origin_pipe.put(('done', socket_data, mask))
 
         elif mask & selectors.EVENT_READ:
             log_print('Handling input')
@@ -500,7 +546,7 @@ class ServerSocketProcess(ServerProcess):
                             # TODO: add in exponential backoff or something
                             #self.queue.put(('server_connect', socket_data['server']))
                             pass
-                        return ('close',)
+                        return self.server_queue.put(('close', socket_data))
 
                     # TODO reject if this gets too big
                     socket_data['input'] += recv_data
@@ -511,7 +557,7 @@ class ServerSocketProcess(ServerProcess):
             try:
                 socket_data['input'].index(b'\n\n')
             except ValueError:
-                return ('done', response)
+                return self.server_queue.put(('done', socket_data, response, mask))
 
             input_ = socket_data['input'].split(b'\n\n')
             socket_data['input'] = input_.pop()
@@ -523,7 +569,7 @@ class ServerSocketProcess(ServerProcess):
                     input_[i] = None
                     continue
 
-            self.origin_pipe.send((socket_data, 'done', response, mask))
+            self.server_queue.put(('done', socket_data, response, mask))
 
             for i in range(len(input_)):
                 if input_[i] is None: continue
@@ -534,32 +580,22 @@ class ServerSocketProcess(ServerProcess):
                             'fd_id': socket_data['id'],
                             'opaque': input_[i]['opaque'] if 'opaque' in input_[i] else {}
                     }
-                    self.origin_pipe.send((input_[i]['opaque'], 'done', {'direction': 'to_servers', 'output': input_[i]}, selectors.EVENT_WRITE))
-                    for tp in self.test_processes:
-                        tp['queue'].put(('handle_input', input_[i]['opaque'], input_[i]['code']))
-                else:
-                    request = input_[i]['opaque']
-                    input_[i]['opaque'] = input_[i]['opaque']['opaque']
-                    if socket_data['type'] == 'server_socket':
-                        input_[i]['serverId'] = socket_data['serverId']
-                    data = {'output': input_[i], 'direction': 'to_client'}
-                    self.origin_pipe.send((request, 'done', data, selectors.EVENT_WRITE))
-            return False
+                    #self.origin_pipe.send(('done', input_[i]['opaque'], {'direction': 'to_servers', 'output': input_[i]}))
+                    self.beam_queue.put(('handle_input', input_[i]['opaque'], input_[i]['code']))
 
-    def handle_server_pipe(self, server_pipe_data, mask):
-        assert mask & selectors.EVENT_READ
-        server_pipe = server_pipe_data['fd']
-        try:
-            request, response = server_pipe.recv()
-        except Exception as e:
-            print(e, server_pipe_data['type'])
-            assert False
-            # TODO: a pipe socket shouldn't ever be closed??
-            return ('close',)
+                #else:
+                #    request = input_[i]['opaque']
+                #    input_[i]['opaque'] = input_[i]['opaque']['opaque']
+                #    if socket_data['type'] == 'server_socket':
+                #        input_[i]['serverId'] = socket_data['serverId']
+                #    data = {'output': input_[i], 'direction': 'to_client'}
+                #    self.origin_pipe.put((request, 'done', data, selectors.EVENT_WRITE))
+
+    def handle_beam_response(self):
+        request, response = self.beam_response_queue.get()
         response['direction'] = 'to_client'
         response['output']['serverId'] = 0
-        self.origin_pipe.send((request, 'done', response, mask))
-        return ('done',{})
+        self.server_queue.put(('done', request, response, 0))
 
 
 # TODO: clear out long requests / old fd_map stuff / etc
@@ -568,21 +604,43 @@ class Server(object):
     def __init__(self, args):
         self.fd_map = FDMap()
 
-        self.model_processes = self.spawn_processes(ServerModelProcess, False, False, args.num_model_processes)
-
-        total_tests = 0
-        self.test_processes = []
+        self.model_configs = {}
+        self.test_configs = {}
         for test in os.listdir(args.data_path):
-            if args.subtests is None or test not in args.subtests: continue
-            if args.num_test_processes is None or len(self.test_processes) < args.num_test_processes:
-                self.test_processes.extend(self.spawn_processes(ServerTestProcess, False, False, 1, self.model_processes, total_tests == 0))
-            tp = self.test_processes[total_tests % len(self.test_processes)]
-            tp['queue'].put(('load_config', test, os.path.join(args.data_path, test), args.save_path))
-            total_tests += 1
-        # XXX very hackish...
-        self.fd_map.total_tests = total_tests
+            for root_idx in os.listdir(os.path.join(args.data_path, test)):
+                rootdir = os.path.join(args.data_path, test, root_idx)
+                if root_idx == 'config.json':
+                    with open(rootdir, 'r') as f:
+                        self.test_configs[test] = json.load(f)
+                    continue
+                for transitions in os.listdir(rootdir):
+                    model_conf_path = os.path.join(rootdir, transitions, args.save_path, 'config.json')
+                    if os.path.isfile(model_conf_path):
+                        model_conf = get_dict(self.model_configs, test, root_idx)
+                        with open(model_conf_path, 'r') as f:
+                            model_conf[transitions] = json.load(f)
 
-        self.socket_processes = self.spawn_processes(ServerSocketProcess, True, True, args.num_socket_processes, self.test_processes)
+        personal_beam_queues = [Queue() for i in range(args.num_beam_processes)]
+        model_queue = Queue()
+        p = Process(target=ServerModelProcess, args=(self.model_configs, args.num_model_processes,
+            personal_beam_queues, model_queue))
+        #p.daemon = True
+        p.start()
+
+        beam_response_queue = Queue()
+        self.fd_map.add(beam_response_queue._reader, 'beam_queue')
+        beam_queue = Queue()
+        p = Process(target=ServerBeamProcess, args=(self.test_configs, self.model_configs, beam_response_queue,
+            personal_beam_queues, model_queue, beam_queue))
+        #p.daemon = True
+        p.start()
+
+        socket_response_queue = Queue()
+        self.fd_map.add(socket_response_queue._reader, 'socket_queue')
+        self.socket_queue = ThreadQueue()
+        for i in range(args.num_socket_processes):
+            t = Thread(target=ServerSocketProcess, args=(beam_queue, beam_response_queue, socket_response_queue, self.socket_queue))
+            t.start()
 
         lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -592,7 +650,7 @@ class Server(object):
 
         args.servers = []
         for server in args.servers:
-            self.socket_processes[0]['queue'].put(('server_connect', server))
+            self.socket_queue.put(('server_connect', server))
 
         self.fd_map.add(lsock, 'listener')
         log_print('listening on {}:{}'.format(args.host, args.port), 1)
@@ -615,19 +673,22 @@ class Server(object):
                     self.fd_map.add(conn, 'client_socket')
                     log_print('accepted connection from {}'.format(addr, conn))
 
-                elif data['type'] in ['server_socket', ServerTestProcess, ServerModelProcess, 'client_socket']:
+                elif data['type'] in ['server_socket', 'client_socket']:
                     # TODO: prioritize reading, since it can cancel ongoing requests?
                     # TODO: technically, we only need to unregister from reading, not writing?
                     self.fd_map.unset_state(fd_id, mask)
                     # send the output off to a server socket
-                    self.socket_processes[0]['queue'].put(('handle_input', data, mask, messageId))
+                    self.socket_queue.put(('handle_socket', data, mask, messageId))
                     messageId += 1
 
 
-                elif data['type'] == ServerSocketProcess:
+                elif data['type'] == 'beam_queue':
+                    self.socket_queue.put(('handle_beam_response',))
+
+                elif data['type'] == 'socket_queue':
                     # TODO: do we have to worry about this recv at all? slow or failing?
                     # we don't about the ServerSocketProcess's socket / socket_data that came back
-                    fd_data, type_, *args = key.fileobj.recv()
+                    type_, fd_data, *args = self.socket_queue.get()
                     if type_ == 'server_connected':
                         self.fd_map.add(fd_data, 'server_socket')
                     elif type_ == 'done':
@@ -641,29 +702,5 @@ class Server(object):
                     print(data['type'])
                     assert False
 
-
     def shutdown(self):
         self.fd_map.shutdown()
-
-    def spawn_processes(self, process_type, is_thread, share_queue, num_processes, *args):
-        # also, is there a ThreadPipe of some kind?
-        input_q = None
-        processes = []
-        for i in range(num_processes):
-            # TODO: should this pipe be closed???
-            parent_pipe, child_pipe = Pipe(False)
-            #self.fd_map.add_pipe(parent_pipe, child_pipe, process_type)
-            self.fd_map.add(parent_pipe, process_type)
-            if is_thread:
-                spawn = Thread
-                new_q = ThreadQueue #type:ignore
-            else:
-                spawn = Process
-                new_q = Queue
-            if input_q is None or not share_queue:
-                input_q = new_q()
-            p = spawn(target=process_type, args=(*args, input_q, child_pipe))
-            p.daemon = True
-            p.start()
-            processes.append({'process': p, 'queue': input_q, 'pipe': parent_pipe})
-        return processes

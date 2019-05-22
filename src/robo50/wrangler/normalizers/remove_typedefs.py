@@ -6,4 +6,4 @@ typedefs = { "size_t":"typedef int", "__builtin_va_list":"typedef int", "__gnuc_
 
 class RemoveTypedefs(ModifyingVisitor):
     def visit_Typedef(self, node):
-        return node if node.name not in typedefs else NodeWrapper(node, None)
+        return node if node.name not in typedefs else NodeWrapper(node, None, True)
