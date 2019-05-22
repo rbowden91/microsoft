@@ -21,9 +21,9 @@ parser.add_argument('-d', '--data_path', help='model output directory (default "
 parser.add_argument('-t', '--subtests', help='which tests to run', type=lambda s: s.split('|'), default=None)
 # XXX XXX XXX there was some kind of error loading when this was 32
 parser.add_argument('--num_model_processes', help='number of model processes (default 32)', type=int, default=16)
-parser.add_argument('--num_test_processes', help='number of test processes (default len(test))', type=int, default=None)
+parser.add_argument('--num_beam_processes', help='number of beam processes (default len(test))', type=int, default=16)
 parser.add_argument('--num_socket_processes', help='number of socket processes (technically threads) (default 8)',
-                    type=int, default=1)
+                    type=int, default=8)
 parser.add_argument('--servers', help='servers', type=lambda s: [tuple(x.split(':')) for x in s.split('|')],
                     default='')
 args = parser.parse_args()

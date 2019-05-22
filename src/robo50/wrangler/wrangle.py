@@ -102,11 +102,8 @@ def wrangle(code : str, is_file=True, tests=None) -> WrangledAST:
     # these can raise exceptions that we'll let pass through
     cfile = ExternalCPP().preprocess(code, is_file)
     ast = c_parser.CParser().parse(cfile)
-    ast = normalize(ast, ['ExpandAssignments', 'WrapExpressions', 'ReturnZero'])
+    ast = normalize(ast, ['ExpandAssignments', 'WrapExpressions', 'ReturnZero', 'RemoveTypedefs', 'RemoveDecls', 'IDRenamer'])
     results = run_tests(ast, tests) if tests is not None else None
-    # TODO: remove decls can't be interpreted while variables share the same name in different scopes
-    ast = normalize(ast, ['RemoveTypedefs', 'RemoveDecls', 'IDRenamer'])
-
 
     ast_data = WrangledAST(ast, results)
 

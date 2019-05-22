@@ -1,0 +1,88 @@
+[
+    {
+    	"test1": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "rejects a negative input like -.1",
+	    "run": [
+		{"type": "stdin", "value": "-1"},
+		{"type": "stdout", "value": ".*"},
+		{"type": "stdin", "value": "1"}
+	    ]
+	},
+    	"test2": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "rejects a non-numeric input of \"foo\"",
+	    "run": [
+		{"type": "stdin", "value": "foo"},
+		{"type": "stdout", "value": ".*"},
+		{"type": "stdin", "value": "1"}
+	    ]
+	},
+    	"test3": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "rejects a non-numeric input of \"\"",
+	    "run": [
+		{"type": "stdin", "value": ""},
+		{"type": "stdout", "value": ".*"},
+		{"type": "stdin", "value": "1"}
+	    ]
+	}
+    },
+    {
+    	"test4": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "input of 0.41 yields output of 4",
+	    "run": [
+		{"type": "stdin", "value": "0.41"},
+		{"type": "stdout", "value": "4\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+    	"test5": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "input of 0.01 yields output of 1",
+	    "run": [
+		{"type": "stdin", "value": "0.01"},
+		{"type": "stdout", "value": "1\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+    	"test6": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "input of 0.15 yields output of 2",
+	    "run": [
+		{"type": "stdin", "value": "0.15"},
+		{"type": "stdout", "value": "2\n"},
+		{"type": "return", "value": 0}
+	    ]
+	},
+    	"test7": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "input of 1.6 yields output of 7",
+	    "run": [
+		{"type": "stdin", "value": "1.6"},
+		{"type": "stdout", "value": "7\n"},
+		{"type": "return", "value": 0}
+	    ]
+	}
+    },
+    {
+    	"test8": {
+	    "argv": "./cash",
+	    "check50": true,
+	    "description": "input of 4.2 yields output of 18",
+	    "run": [
+		{"type": "stdin", "value": "4.2"},
+		{"type": "stdout", "value": "18\n"},
+		{"type": "return", "value": 0}
+	    ]
+	}
+    }
+]
