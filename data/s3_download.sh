@@ -15,8 +15,7 @@ download () {
 
 mkdir -p cs50_data/s3_unsorted_downloads
 cd cs50_data/s3_unsorted_downloads
-for i in $(seq -f "%g" 50000 65535); do
-    num=`printf "%04x" $i`
+for i in $(seq -f "%g" 30000 39999); do num=`printf "%04x" $i`
     children=$(($(pgrep --parent $$ | wc -l) - 1))
     while (( children > 100 )); do
     	sleep 1
