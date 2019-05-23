@@ -15,12 +15,12 @@ if ! [ -f /tmp/scc/scc ]; then
     make
 fi
 cd "$rootdir"
-#for i in *; do
-#    cd "$rootdir/$i"
-#    echo $i
-#    find . -type f -not -name "$i.c" -delete
-#done
-#cd ..
+for i in *; do
+    cd "$rootdir/$i"
+    echo $i
+    find . -type f -not -name "$i.c" -delete
+done
+cd ..
 
 function process () {
     file="$1"
